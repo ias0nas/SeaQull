@@ -3,13 +3,17 @@
   "execution": "trusted-worker",
   "id": "seaqull",
   "name": "SeaQull",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SQL Server client for Orca: browse databases, run queries in workbook tabs, copy and export results.",
   "license": "MIT",
   "author": {
     "name": "Jason Diolatzis"
   },
   "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "The SeaQull logo and name beside a query window showing completion of a foreign-key join and a result grid"
+  },
   "screenshots": [
     {
       "path": "assets/screenshots/console.png",
