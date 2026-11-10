@@ -3,7 +3,7 @@
   "execution": "trusted-worker",
   "id": "seaqull",
   "name": "SeaQull",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "SQL Server client for Orca: browse databases, run queries in workbook tabs, copy and export results.",
   "license": "MIT",
   "author": {

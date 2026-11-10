@@ -69667,7 +69667,9 @@ function capped(nodes, parentKey) {
 async function listDatabases(connection) {
   const rows = await queryRows(
     connection,
-    `SELECT name FROM sys.databases WHERE state_desc = 'ONLINE' AND HAS_DBACCESS(name) = 1 ORDER BY CASE WHEN database_id <= 4 THEN 1 ELSE 0 END, name`
+    `SELECT name FROM sys.databases
+      WHERE state_desc = 'ONLINE' AND (HAS_DBACCESS(name) = 1 OR CAST(SERVERPROPERTY('EngineEdition') AS int) = 5)
+      ORDER BY CASE WHEN database_id <= 4 THEN 1 ELSE 0 END, name`
   );
   return rows.map((r) => String(r.name));
 }

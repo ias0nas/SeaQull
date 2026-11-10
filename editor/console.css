@@ -74,6 +74,9 @@ select, input, button {
   padding: 3px 8px; min-height: 26px;
 }
 select { max-width: 220px; }
+:root { color-scheme: dark; }
+:root.light { color-scheme: light; }
+option { background: var(--orca-popover, var(--orca-background, Canvas)); color: var(--orca-popover-foreground, var(--orca-foreground, CanvasText)); }
 button { cursor: pointer; background: var(--orca-secondary, transparent); color: var(--orca-secondary-foreground, inherit); }
 button.primary { background: var(--orca-primary); color: var(--orca-primary-foreground); border-color: transparent; }
 button:disabled { opacity: 0.5; cursor: default; }

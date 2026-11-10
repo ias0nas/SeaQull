@@ -1,10 +1,11 @@
 // Integration tests against the local dev SQL Server (npm run db:up && npm run db:seed).
 // Run with: npm run test:integration
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { after, before, test } from 'node:test'
 import type { Connection } from 'tedious'
 import { completionColumns } from '../worker/completion.ts'
-import { columnNodes, databaseNodes, decodeKey, encodeKey, folderNodes, objectNodes, schemaNodes } from '../worker/metadata.ts'
+import { columnNodes, databaseNodes, decodeKey, encodeKey, folderNodes, listDatabases, objectNodes, schemaNodes } from '../worker/metadata.ts'
 import { openConnection, queryRows, type Credentials, type Endpoint } from '../worker/mssql.ts'
 import { exportResult } from '../src/shared/export.ts'
 import { newSessionText, probeTransaction, RunManager, type SessionMemory, type Target } from '../worker/runs.ts'
@@ -78,6 +79,33 @@ test('tree: databases → schemas → folders → tables → columns', async () 
   const procs = await objectNodes(connection, decodeKey(encodeKey({ connection: 'local', database: 'AdventureWorks2022', schema: 'dbo', folder: 'procedures' })))
   const params = await columnNodes(connection, decodeKey(procs.find((p) => p.label === 'uspGetBillOfMaterials')!.key))
   assert.deepEqual(params.map((p) => p.label), ['@StartProductID', '@CheckDate'])
+})
+
+test('database list: only databases the login can open, outside Azure SQL Database', async () => {
+  const [{ edition }] = await queryRows(connection, "SELECT CAST(SERVERPROPERTY('EngineEdition') AS int) AS edition")
+  assert.notEqual(edition, 5, 'the dev server is not Azure SQL Database')
+  const login = `seaqull_limited_${process.pid}`
+  const password = `Aa1!${randomUUID()}`
+  await queryRows(connection, `CREATE LOGIN [${login}] WITH PASSWORD = N'${password}', CHECK_POLICY = OFF`)
+  try {
+    // No user in AdventureWorks2022 (and no guest there): HAS_DBACCESS is 0, so it is left out.
+    const limited = await openConnection({ ...endpoint, database: 'master' }, { kind: 'sql', user: login, password })
+    try {
+      const names = await listDatabases(limited)
+      assert.ok(names.includes('master'))
+      assert.ok(!names.includes('AdventureWorks2022'))
+    } finally {
+      // DROP LOGIN fails while the login still has a session.
+      await new Promise((resolve) => {
+        limited.once('end', resolve)
+        limited.close()
+      })
+    }
+    // Opening it anyway fails with the server's error (the tree shows it under the node).
+    await assert.rejects(openConnection(endpoint, { kind: 'sql', user: login, password }), /Cannot open database|Login failed/)
+  } finally {
+    await queryRows(connection, `DROP LOGIN [${login}]`)
+  }
 })
 
 test('tree: names needing quoting work (WideWorldImporters in-memory table)', async () => {
