@@ -1,0 +1,10 @@
+{
+  // The console page runs in a browser frame: checked without Node's types, so a Node-only API
+  // used there (Buffer, process, node: imports) is a type error rather than a runtime failure.
+  "extends": "./.orca/types/tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["./.orca/types"],
+    "types": ["orca", "orca-host", "orca-frame", "orca-services"]
+  },
+  "include": ["editor", "src"]
+}

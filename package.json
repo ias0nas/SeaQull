@@ -1,0 +1,49 @@
+{
+  "name": "seaqull",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "description": "SeaQull: database client plugin for Orca",
+  "license": "MIT",
+  "author": "Jason Diolatzis",
+  "repository": "github:ias0nas/SeaQull",
+  "type": "module",
+  "scripts": {
+    "types": "node dev/scripts/orca-types.mjs",
+    "typecheck": "node dev/scripts/orca-types.mjs && tsc -p . --noEmit && tsc -p tsconfig.editor.json --noEmit",
+    "validate": "orca plugin validate . && orca plugin check .",
+    "build": "node dev/scripts/build.mjs",
+    "build:worker": "node dev/scripts/build.mjs worker",
+    "build:editor": "node dev/scripts/build.mjs editor",
+    "build:watch": "node --watch-path=worker --watch-path=src dev/scripts/build.mjs worker",
+    "check:bundles": "node dev/scripts/build.mjs --check",
+    "check:package": "node --env-file-if-exists=dev/.env dev/scripts/check-package.mjs",
+    "dev:load": "node dev/scripts/build.mjs && orca plugin dev load .",
+    "db:up": "dev/scripts/db.sh up",
+    "db:seed": "dev/scripts/db.sh seed",
+    "db:down": "dev/scripts/db.sh down",
+    "preview": "node --env-file-if-exists=dev/.env dev/scripts/preview.mjs",
+    "smoke": "node --env-file=dev/.env dev/scripts/smoke.mjs",
+    "smoke:orca": "ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca --env-file=dev/.env dev/scripts/smoke.mjs",
+    "test": "node --test test/*.test.ts",
+    "test:integration": "node --env-file=dev/.env --test --test-concurrency=1 --test-timeout=120000 test/*.itest.ts"
+  },
+  "dependencies": {
+    "tedious": "19.2.2"
+  },
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.20.4",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
+    "@types/node": "^24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "~5.9"
+  }
+}

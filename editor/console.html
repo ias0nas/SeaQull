@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="console.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="explorer" aria-label="Database explorer">
+        <header class="explorer-header">
+          <span class="explorer-title">Connections</span>
+          <button id="explorer-add" class="icon-button" title="New connection" aria-label="New connection"></button>
+          <button id="explorer-locate" class="icon-button" title="Show the object at the cursor, or the tab's database" aria-label="Show the object at the cursor, or the tab's database"></button>
+          <button id="explorer-refresh" class="icon-button" title="Refresh all" aria-label="Refresh all"></button>
+          <button id="explorer-collapse" class="icon-button" title="Collapse all" aria-label="Collapse all"></button>
+          <button id="explorer-side" class="icon-button" title="Move the explorer to the other side" aria-label="Move the explorer to the other side"></button>
+        </header>
+        <div id="tree" aria-label="Database objects"></div>
+      </aside>
+      <div id="explorer-splitter" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+      <main id="console">
+        <nav id="query-tabs" role="tablist" aria-label="Query tabs" hidden></nav>
+        <header class="toolbar">
+          <button id="explorer-toggle" class="icon-button" title="Show or hide the explorer" aria-label="Show or hide the explorer"></button>
+          <button id="run" class="primary">▶ Run</button>
+          <button id="cancel" disabled>■ Cancel</button>
+          <span id="status" class="status"></span>
+          <div class="toolbar-targets">
+            <label class="picker"><span id="connection-icon" class="picker-icon connection"></span><select id="connection" aria-label="Connection"></select></label>
+            <label class="picker"><span id="database-icon" class="picker-icon"></span><select id="database" aria-label="Database"></select></label>
+          </div>
+        </header>
+        <div id="editors"></div>
+        <div id="splitter" role="separator" aria-orientation="horizontal" title="Drag to resize"></div>
+        <section id="results">
+          <nav id="tabs" role="tablist"></nav>
+          <div id="result-bar" class="result-bar" hidden>
+            <span id="result-info"></span>
+            <span class="spacer"></span>
+            <label class="check"><input id="include-headers" type="checkbox" checked /> Headers</label>
+            <input id="table-name" placeholder="target table" title="Table name for SQL INSERT export" hidden />
+            <select id="format" title="Format for Copy, Save… and the grid's Copy as…"></select>
+            <button id="copy-result" class="with-icon"></button>
+            <button id="save-result" class="with-icon" title="Save the whole result to a file in this format (Orca's save dialog)"></button>
+            <button id="ready" class="primary" hidden></button>
+          </div>
+          <div id="grid" class="grid" hidden></div>
+          <ol id="messages" class="messages" hidden></ol>
+          <div id="empty" class="empty">Run a query to see results here.</div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="connection-dialog" aria-labelledby="cd-title">
+      <form class="dialog-form">
+        <h2 id="cd-title">New connection</h2>
+        <label class="stack">Name<input id="cd-name" required placeholder="Local SQL Server" /></label>
+        <div class="stack">Colour
+          <div class="colors">
+            <div id="cd-swatches" class="swatches" role="radiogroup" aria-label="Colour"></div>
+            <input id="cd-color" class="hex" placeholder="#rrggbb" maxlength="7" spellcheck="false" aria-label="Colour as hex" />
+          </div>
+        </div>
+        <div class="row">
+          <label class="stack grow">Server<input id="cd-server" required placeholder="myserver.database.windows.net" /></label>
+          <label class="stack port">Port<input id="cd-port" required inputmode="numeric" /></label>
+        </div>
+        <label class="stack">Database (optional)<input id="cd-database" placeholder="login's default" /></label>
+        <label class="stack">Authentication
+          <select id="cd-auth">
+            <option value="sql">SQL Server login (password in OS keychain)</option>
+            <option value="entra">Microsoft Entra ID (az login)</option>
+          </select>
+        </label>
+        <div id="cd-sql-fields" class="row">
+          <label class="stack grow">User<input id="cd-user" autocomplete="off" /></label>
+          <label class="stack grow">Password<input id="cd-password" type="password" autocomplete="off" /></label>
+        </div>
+        <p id="cd-entra-note" class="note" hidden>Uses your Azure CLI sign-in: run <code>az login</code> first. No password is stored.</p>
+        <label class="check"><input id="cd-encrypt" type="checkbox" /> Encrypt connection</label>
+        <label class="check"><input id="cd-trust" type="checkbox" /> Trust server certificate (local/dev only)</label>
+        <p id="cd-status" class="dialog-status" hidden></p>
+        <div class="dialog-buttons">
+          <button id="cd-test" type="button" title="Connect with these settings without saving them">Test</button>
+          <span class="spacer"></span>
+          <button id="cd-cancel" type="button" title="Close without saving (Esc)">Cancel</button>
+          <button id="cd-save" type="submit" class="primary" title="Save the connection (Enter)">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog">
+      <p id="confirm-text"></p>
+      <div class="dialog-buttons">
+        <span class="spacer"></span>
+        <button id="confirm-cancel" type="button" title="Esc">Cancel</button>
+        <button id="confirm-ok" type="button" class="danger-button"></button>
+      </div>
+    </dialog>
+
+    <script type="module" src="console.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+# Local SQL Server for SeaQull development. The image is x86 only: on Apple Silicon it runs under
+# Rosetta (OrbStack or Docker Desktop).
+# Usage: dev/scripts/db.sh up | seed | sql | down. See CONTRIBUTING.md.
+name: seaqull-dev
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:${MSSQL_TAG:-2025-CU10-ubuntu-24.04}
+    platform: linux/amd64
+    hostname: seaqull-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?run dev/scripts/db.sh up to generate dev/.env}
+      # sqlcmd reads this, so the password never appears on a command line (ps) in the container.
+      SQLCMDPASSWORD: ${MSSQL_SA_PASSWORD}
+    ports:
+      - "127.0.0.1:${MSSQL_PORT:-1433}:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-C", "-S", "localhost", "-U", "sa", "-Q", "SELECT 1", "-b", "-o", "/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+volumes:
+  mssql-data:

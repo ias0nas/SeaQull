@@ -1,0 +1,10 @@
+node_modules/
+.orca/
+.DS_Store
+/dist/
+dev/.env
+dev/backups/
+
+# Files Orca creates for "New …" in the workspace root while testing
+/untitled*.seaqull
+/untitled*.sql

@@ -1,0 +1,266 @@
+:root {
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --row-h: 24px;
+  --border: var(--orca-border, #8884);
+  --muted: var(--orca-muted-foreground, #888);
+  /* SQL editor (sql-editor.ts). Syntax colours for dark themes; Orca puts .light on <html> for light. */
+  --sql-keyword: #569cd6;
+  --sql-type: #4ec9b0;
+  --sql-function: #dcdcaa;
+  --sql-variable: #9cdcfe;
+  --sql-string: #ce9178;
+  --sql-number: #b5cea8;
+  --sql-comment: #6a9955;
+  --sql-selection: color-mix(in srgb, #3b82f6 45%, transparent);
+  --sql-selection-blur: color-mix(in srgb, #3b82f6 30%, transparent);
+  --sql-active-line: color-mix(in srgb, var(--orca-accent, #8883) 40%, transparent);
+  --sql-bracket: color-mix(in srgb, #3b82f6 35%, transparent);
+  --sql-search-match: color-mix(in srgb, #eab308 30%, transparent);
+  --sql-search-outline: color-mix(in srgb, #eab308 60%, transparent);
+  --sql-search-current: color-mix(in srgb, #f97316 50%, transparent);
+}
+:root.light {
+  --sql-keyword: #0000ff;
+  --sql-type: #267f99;
+  --sql-function: #795e26;
+  --sql-variable: #001080;
+  --sql-string: #a31515;
+  --sql-number: #098658;
+  --sql-comment: #008000;
+  --sql-selection: color-mix(in srgb, #3b82f6 30%, transparent);
+  --sql-selection-blur: color-mix(in srgb, #3b82f6 20%, transparent);
+  --sql-active-line: color-mix(in srgb, var(--orca-accent, #8882) 50%, transparent);
+  --sql-bracket: color-mix(in srgb, #3b82f6 25%, transparent);
+  --sql-search-match: color-mix(in srgb, #facc15 45%, transparent);
+  --sql-search-current: color-mix(in srgb, #f97316 40%, transparent);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--orca-background, Canvas);
+  color: var(--orca-foreground, CanvasText);
+  font: 13px/1.4 system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+#app { display: flex; height: 100vh; }
+#console { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+
+/* [explorer] [Run] [Cancel] status ……… [⛁ connection ▾] [⛁ database ▾]: one line at any width.
+   The status takes the free space and truncates; when even that is gone the pickers shrink, and
+   below their smallest the pickers' group is cut off, never the buttons. */
+.toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); flex-wrap: nowrap; min-width: 0; }
+.toolbar > button { flex: 0 0 auto; }
+/* At least both pickers at their smallest (75 + 8 + 75), unless that would not leave room for the
+   explorer toggle, Run, Cancel and the gaps (about 200px): then it is cut off instead. The padding
+   (taken back by the margin) keeps focus rings outside the selects from being clipped. */
+.toolbar-targets {
+  display: flex; align-items: center; gap: 8px; flex: 0 6 auto; overflow: hidden;
+  min-width: max(0px, min(164px, calc(100% - 200px))); padding: 3px; margin: -3px;
+}
+.field { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+/* An icon and its select in one label: clicking the icon focuses the select. */
+.picker { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; flex: 0 6 auto; min-width: 75px; }
+.picker select { flex: 0 1 auto; min-width: 56px; }
+.picker-icon { display: flex; flex: 0 0 auto; cursor: pointer; }
+/* A connection with a colour: its picker carries it (border and icon), with the toolbar's stripe.
+   The focus ring goes outside the coloured border. */
+#console.colored .picker-icon.connection { color: var(--tab-color); }
+#console.colored #connection { border-color: var(--tab-color); }
+#console.colored #connection:focus-visible { outline-offset: 1px; }
+select, input, button {
+  font: inherit; color: inherit;
+  background: var(--orca-input, transparent);
+  border: 1px solid var(--border); border-radius: var(--orca-radius, 6px);
+  padding: 3px 8px; min-height: 26px;
+}
+select { max-width: 220px; }
+button { cursor: pointer; background: var(--orca-secondary, transparent); color: var(--orca-secondary-foreground, inherit); }
+button.primary { background: var(--orca-primary); color: var(--orca-primary-foreground); border-color: transparent; }
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--orca-ring, Highlight); outline-offset: -1px; }
+.status { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Takes the free space; when there is none it keeps about 100px while the pickers shrink. */
+.toolbar .status { flex: 1 1 100px; min-width: 0; text-align: left; }
+.status.error { color: var(--orca-destructive); }
+
+/* max-height: a height saved in a tall window must not push the results off a short one. One
+   CodeMirror editor per query tab fills it (sql-editor.ts styles the editor itself). */
+#editors { flex: 0 0 auto; height: 35vh; min-height: 60px; max-height: calc(100vh - 160px); display: flex; }
+
+/* --- Query tabs (workbooks) and the connection colour ------------------------------------------ */
+#query-tabs {
+  flex: 0 0 auto; display: flex; align-items: stretch; overflow-x: auto; scrollbar-width: none;
+  background: var(--orca-card, Canvas); border-bottom: 1px solid var(--border); min-height: 32px;
+}
+.qtab {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px; max-width: 220px;
+  padding: 0 6px 0 10px; font-size: 12.5px; color: var(--muted); cursor: default; user-select: none;
+  border-right: 1px solid var(--border); box-shadow: inset 0 2px 0 var(--conn, transparent); outline: none;
+}
+.qtab:hover { color: var(--orca-foreground, CanvasText); }
+.qtab[aria-selected="true"] { background: var(--orca-background, Canvas); color: var(--orca-foreground, CanvasText); box-shadow: inset 0 2px 0 var(--conn, var(--muted)); margin-bottom: -1px; }
+.qtab:focus-visible { outline: 1px solid var(--orca-ring, Highlight); outline-offset: -1px; }
+.qtab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Run state only (the connection colour is the stripe along the top): a spinner, or an error icon. */
+.qtab-state { display: none; }
+.qtab-state.running { display: block; flex: 0 0 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); border-right-color: transparent; animation: spin 0.8s linear infinite; }
+.qtab-state.error { display: inline-flex; color: var(--orca-destructive); }
+.qtab-state.error svg { width: 12px; height: 12px; }
+.qtab-close { display: inline-flex; padding: 0; width: 18px; min-height: 18px; border: 0; background: transparent; color: var(--muted); border-radius: 4px; visibility: hidden; }
+.qtab:hover .qtab-close, .qtab[aria-selected="true"] .qtab-close { visibility: visible; }
+.qtab-close:hover { background: var(--orca-accent); color: var(--orca-foreground, CanvasText); }
+.qtab-close svg { width: 12px; height: 12px; margin: auto; }
+.qtab-rename { font-size: 12.5px; padding: 1px 4px; min-height: 0; width: auto; }
+.qtab-add { align-self: center; margin: 0 4px; flex: 0 0 auto; }
+#console.colored .toolbar { box-shadow: inset 0 2px 0 var(--tab-color); }
+#splitter { flex: 0 0 5px; cursor: row-resize; border-top: 1px solid var(--border); background: var(--orca-muted, transparent); }
+#splitter:hover { background: var(--orca-accent); }
+
+#results { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+#tabs { flex: 0 0 auto; display: flex; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+#tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 4px 10px; }
+#tabs button[aria-selected="true"] { color: inherit; border-bottom-color: var(--orca-primary); }
+#tabs button.has-error { color: var(--orca-destructive); }
+.result-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.result-bar .spacer { flex: 1; }
+#result-info { color: var(--muted); }
+#table-name { width: 180px; }
+.with-icon { display: inline-flex; align-items: center; gap: 5px; }
+.result-bar .check { font-size: 12px; margin: 0 4px; white-space: nowrap; }
+.with-icon span { min-width: 2.5em; }
+
+.grid { flex: 1 1 auto; overflow: auto; position: relative; font: 12px var(--mono); outline: none; --sel: #3b82f6; }
+.grid-header { position: sticky; top: 0; z-index: 2; display: flex; background: var(--orca-card, Canvas); border-bottom: 1px solid var(--border); width: max-content; min-width: 100%; }
+.grid-body { position: relative; }
+.grid-row { position: absolute; left: 0; display: flex; height: var(--row-h); width: max-content; min-width: 100%; }
+.grid-row.odd { background: color-mix(in srgb, var(--orca-muted, #8881) 45%, transparent); }
+.grid-row:hover { background: color-mix(in srgb, var(--orca-accent, #88f3) 60%, transparent); }
+.cell, .hcell {
+  flex: 0 0 auto; padding: 0 8px; height: var(--row-h); line-height: var(--row-h);
+  white-space: pre; overflow: hidden; text-overflow: ellipsis;
+  border-right: 1px solid var(--border); user-select: none;
+}
+.hcell { font-weight: 600; font-family: system-ui, sans-serif; position: relative; }
+.hcell small { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.rownum { color: var(--muted); text-align: right; position: sticky; left: 0; z-index: 1; background: var(--orca-card, Canvas); user-select: none; }
+.num { text-align: right; }
+.null { color: var(--muted); font-style: italic; }
+
+/* Selection: a fixed blue, since some themes' primary colour is near-white. */
+.hcell[data-c], .corner { cursor: pointer; }
+.grid-body .rownum { cursor: pointer; }
+.cell.sel { background: color-mix(in srgb, var(--sel) 22%, transparent); }
+.grid:not(:focus-within) .cell.sel { background: color-mix(in srgb, var(--sel) 12%, transparent); }
+.cell.active { box-shadow: inset 0 0 0 2px var(--sel); }
+.grid:not(:focus-within) .cell.active { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sel) 60%, transparent); }
+.hcell.selected, .rownum.selected { background: color-mix(in srgb, var(--sel) 18%, var(--orca-card, Canvas)); color: var(--orca-foreground, CanvasText); }
+.hcell.whole, .rownum.whole { background: color-mix(in srgb, var(--sel) 38%, var(--orca-card, Canvas)); color: var(--orca-foreground, CanvasText); }
+.loading { color: var(--muted); }
+
+.messages { flex: 1 1 auto; overflow: auto; margin: 0; padding: 6px 8px 6px 36px; font: 12px/1.5 var(--mono); }
+.messages li { white-space: pre-wrap; }
+.messages li.error { color: var(--orca-destructive); }
+.messages a { color: inherit; text-decoration: underline; cursor: pointer; }
+.empty { color: var(--muted); padding: 16px; }
+
+/* --- Explorer ------------------------------------------------------------------------------- */
+/* max-width: a width saved in a wide window must not squeeze the console away in a narrow one. */
+#explorer { flex: 0 0 auto; width: 260px; min-width: 160px; max-width: calc(100vw - 320px); display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--orca-card, Canvas); }
+#app.explorer-hidden #explorer, #app.explorer-hidden #explorer-splitter { display: none; }
+#app.explorer-right { flex-direction: row-reverse; }
+#app.explorer-right #explorer { border-right: 0; border-left: 1px solid var(--border); }
+#app.explorer-right #explorer-splitter { margin-left: 0; margin-right: -4px; }
+#explorer-splitter { flex: 0 0 4px; margin-left: -4px; cursor: col-resize; position: relative; z-index: 3; }
+#explorer-splitter:hover { background: var(--orca-accent); }
+.explorer-header { display: flex; align-items: center; gap: 2px; padding: 6px 6px 6px 10px; border-bottom: 1px solid var(--border); min-height: 39px; }
+.explorer-title { flex: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 0; width: 26px; min-height: 26px; border-color: transparent; background: transparent; color: var(--muted); }
+.icon-button:hover { background: var(--orca-accent); color: var(--orca-accent-foreground, inherit); }
+
+#tree { flex: 1 1 auto; overflow: auto; padding: 4px 0; outline: none; font-size: 12.5px; }
+.tree-row { display: flex; align-items: center; gap: 4px; height: 22px; padding-right: 8px; white-space: nowrap; cursor: default; user-select: none; }
+.tree-row:hover { background: color-mix(in srgb, var(--orca-accent, #88f3) 50%, transparent); }
+.tree-row[aria-selected="true"] { background: var(--orca-accent); color: var(--orca-accent-foreground, inherit); }
+#tree:focus-visible .tree-row[aria-selected="true"] { outline: 1px solid var(--orca-ring, Highlight); outline-offset: -1px; }
+.twisty { flex: 0 0 14px; display: inline-flex; color: var(--muted); }
+.twisty svg { transition: transform 0.1s; }
+.tree-row[aria-expanded="true"] .twisty:not(.busy) svg { transform: rotate(90deg); }
+.twisty.busy svg { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.glyph { flex: 0 0 14px; display: inline-flex; color: var(--muted); }
+.label { overflow: hidden; text-overflow: ellipsis; }
+.description { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1000; }
+.tree-row.current > .label { font-weight: 600; }
+/* The explorer's glyphs and the editor's completion icons (sql-editor.ts). */
+.cm-sqlIcon { color: var(--muted); }
+.kind-table > .glyph, .cm-sqlIcon.kind-table { color: #4f8fd6; }
+.kind-view > .glyph, .cm-sqlIcon.kind-view { color: #9a74d8; }
+.kind-procedure > .glyph, .cm-sqlIcon.kind-procedure { color: #d08a3c; }
+.kind-function > .glyph, .cm-sqlIcon.kind-function { color: #3fa57f; }
+.cm-sqlIcon.kind-synonym { color: #5aa6b8; }
+.cm-sqlIcon.kind-key { color: #c9a227; }
+.cm-sqlIcon.kind-join { color: #c46a9e; }
+.tree-row.pk > .glyph { color: #c9a227; }
+/* Connection colours tint the icon. The active tab's connection gets a stripe (in its colour) and,
+   with its database, a bold name. */
+.tree-row.colored > .glyph { color: var(--conn); }
+.tree-row.current.kind-connection { box-shadow: inset 3px 0 0 var(--conn, var(--orca-foreground, CanvasText)); }
+.kind-error { color: var(--orca-destructive); white-space: normal; height: auto; min-height: 22px; }
+.kind-error > .glyph { color: var(--orca-destructive); }
+.kind-more { color: var(--muted); font-style: italic; }
+.tree-empty { padding: 12px; color: var(--muted); line-height: 2.2; }
+
+/* --- Menu and dialogs ----------------------------------------------------------------------- */
+.menu {
+  position: fixed; z-index: 10; min-width: 190px; padding: 4px; display: flex; flex-direction: column;
+  background: var(--orca-popover, Canvas); color: var(--orca-popover-foreground, inherit);
+  border: 1px solid var(--border); border-radius: var(--orca-radius, 6px); box-shadow: 0 6px 24px #0004;
+}
+.menu button { text-align: left; border: 0; background: transparent; color: inherit; border-radius: 4px; padding: 4px 10px; min-height: 26px; }
+.menu button:hover, .menu button:focus { background: var(--orca-accent); color: var(--orca-accent-foreground, inherit); outline: none; }
+.menu button.danger { color: var(--orca-destructive); }
+.menu-separator { height: 1px; margin: 4px 2px; background: var(--border); }
+
+dialog {
+  padding: 16px; border: 1px solid var(--border); border-radius: calc(var(--orca-radius, 6px) + 2px);
+  background: var(--orca-popover, Canvas); color: var(--orca-popover-foreground, inherit);
+  width: min(460px, calc(100vw - 32px)); box-shadow: 0 12px 40px #0006;
+}
+dialog::backdrop { background: #0006; }
+dialog h2 { margin: 0 0 4px; font-size: 15px; }
+.dialog-form { display: flex; flex-direction: column; gap: 10px; }
+.dialog-form .row { display: flex; gap: 8px; }
+.dialog-form .row[hidden] { display: none; }
+.stack { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.stack input, .stack select { color: var(--orca-foreground, CanvasText); max-width: none; width: 100%; }
+.stack.grow { flex: 1; }
+.stack.port { width: 90px; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.colors { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.swatches { display: flex; gap: 6px; }
+.swatch {
+  width: 22px; height: 22px; min-height: 0; padding: 0; border-radius: 50%;
+  background: var(--swatch); border: 2px solid transparent; box-shadow: inset 0 0 0 1px #0003;
+}
+.swatch.none { background: linear-gradient(135deg, transparent 45%, var(--orca-destructive, #e5534b) 45% 55%, transparent 55%); box-shadow: inset 0 0 0 1px var(--border); }
+.swatch[aria-checked="true"] { border-color: var(--orca-foreground, CanvasText); }
+.colors .hex { width: 96px; font-family: var(--mono); border-left: 10px solid var(--swatch, transparent) !important; }
+.hex.invalid { border-color: var(--orca-destructive) !important; }
+.check input { min-height: 0; margin: 0; }
+.note { margin: 0; font-size: 12px; color: var(--muted); }
+.dialog-status { margin: 0; padding: 8px 10px; border-radius: var(--orca-radius, 6px); font-size: 12px; background: var(--orca-muted, #8882); overflow-wrap: anywhere; }
+.dialog-status[data-tone="success"] { color: #2f9e6a; }
+.dialog-status[data-tone="danger"] { color: var(--orca-destructive); }
+.dialog-buttons { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.dialog-buttons .spacer { flex: 1; }
+#confirm-dialog p { margin: 0 0 8px; }
+.danger-button { background: var(--orca-destructive); color: var(--orca-destructive-foreground, white); border-color: transparent; }
+
+.tooltip {
+  position: fixed; z-index: 20; max-width: 360px; padding: 5px 8px; pointer-events: none;
+  font: 12px/1.4 system-ui, -apple-system, sans-serif; white-space: pre-line;
+  background: var(--orca-popover, Canvas); color: var(--orca-popover-foreground, CanvasText);
+  border: 1px solid var(--border); border-radius: var(--orca-radius, 6px); box-shadow: 0 4px 16px #0005;
+}
+
+[hidden] { display: none !important; }

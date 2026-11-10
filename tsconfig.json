@@ -1,0 +1,11 @@
+{
+  // The worker, shared code and tests. Orca's generated config (npm run types) leaves out Node's
+  // types, which the worker needs, so typeRoots/types are widened to add @types/node.
+  // The console page (editor/) is checked separately by tsconfig.editor.json, without Node's types.
+  "extends": "./.orca/types/tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["./.orca/types", "./node_modules/@types"],
+    "types": ["orca", "orca-host", "orca-frame", "orca-worker", "orca-services", "orca-testing", "node"]
+  },
+  "include": ["src", "worker", "test"]
+}

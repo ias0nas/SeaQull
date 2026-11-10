@@ -1,0 +1,107 @@
+{
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "seaqull",
+  "name": "SeaQull",
+  "version": "0.1.0",
+  "description": "SQL Server client for Orca: browse databases, run queries in workbook tabs, copy and export results.",
+  "license": "MIT",
+  "author": {
+    "name": "Jason Diolatzis"
+  },
+  "icon": "assets/icon.png",
+  "screenshots": [
+    {
+      "path": "assets/screenshots/console.png",
+      "alt": "Completion offering a foreign-key join condition after ON, with a result grid below and the object explorer on the right",
+      "caption": "Completion with foreign-key joins, the result grid and the object explorer"
+    },
+    {
+      "path": "assets/screenshots/connection.png",
+      "alt": "The New connection dialog: name, colour, server and port, database, authentication, user and password, and encryption options",
+      "caption": "Adding a connection"
+    }
+  ],
+  "repository": "https://github.com/ias0nas/SeaQull",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "pluginApi": 1,
+  "main": "worker/dist/main.mjs",
+  "contributes": {
+    "customEditors": [
+      {
+        "id": "console",
+        "title": "SeaQull",
+        "extensions": [
+          ".seaqull"
+        ],
+        "entry": "editor/console.html",
+        "priority": "default",
+        "frame": "isolated"
+      },
+      {
+        "id": "sql",
+        "title": "SeaQull console",
+        "extensions": [
+          ".sql"
+        ],
+        "entry": "editor/console.html",
+        "priority": "option",
+        "frame": "isolated"
+      }
+    ],
+    "newFiles": [
+      {
+        "id": "workbook",
+        "title": "New SeaQull workbook",
+        "extension": ".seaqull",
+        "template": "templates/workbook.seaqull"
+      }
+    ],
+    "settings": [
+      {
+        "key": "maxRows",
+        "title": "Row limit per result",
+        "description": "Rows kept per result set. Past it the batch is stopped, so a SELECT * on a huge table stays responsive. Exports contain the rows kept.",
+        "type": "integer",
+        "default": 10000,
+        "minimum": 100,
+        "maximum": 1000000
+      },
+      {
+        "key": "explorerSide",
+        "title": "Explorer position",
+        "description": "Which side of the SQL console the object explorer sits on.",
+        "type": "string",
+        "enum": ["left", "right"],
+        "enumLabels": ["Left", "Right"],
+        "default": "left"
+      },
+      {
+        "key": "azPath",
+        "title": "Azure CLI path",
+        "description": "Full path to az, for Microsoft Entra ID connections. Leave empty to search PATH, /opt/homebrew/bin and /usr/local/bin.",
+        "type": "string",
+        "default": "",
+        "placeholder": "/opt/homebrew/bin/az"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "activity"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "secrets:own"
+    },
+    {
+      "kind": "settings:own"
+    }
+  ]
+}
