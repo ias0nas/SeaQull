@@ -14,6 +14,7 @@
           <button id="explorer-refresh" class="icon-button" title="Refresh all" aria-label="Refresh all"></button>
           <button id="explorer-collapse" class="icon-button" title="Collapse all" aria-label="Collapse all"></button>
           <button id="explorer-side" class="icon-button" title="Move the explorer to the other side" aria-label="Move the explorer to the other side"></button>
+          <button id="explorer-more" class="icon-button" title="More: export or import connections" aria-label="More" aria-haspopup="menu"></button>
         </header>
         <div id="tree" aria-label="Database objects"></div>
       </aside>
@@ -114,6 +115,30 @@
           <button id="si-ok" type="submit" class="primary">Connect</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="import-dialog" aria-labelledby="im-title">
+      <h2 id="im-title">Import connections</h2>
+      <div id="im-choose" class="dialog-form">
+        <div id="im-drop" class="drop-zone">
+          <span>Drop a connections file here, or</span>
+          <button id="im-file" type="button">Choose file…</button>
+          <input id="im-input" type="file" accept=".json,application/json" hidden />
+        </div>
+        <label class="stack">Or paste its contents<textarea id="im-text" rows="6" spellcheck="false" placeholder='{ "format": "seaqull-connections", … }'></textarea></label>
+      </div>
+      <div id="im-preview" hidden>
+        <p id="im-summary"></p>
+        <ul id="im-list" class="import-list"></ul>
+        <p class="note">Imports only add connections: saved ones are never changed. Passwords are not in the file; they are asked for when you connect.</p>
+      </div>
+      <p id="im-status" class="dialog-status" data-tone="danger" hidden></p>
+      <div class="dialog-buttons">
+        <button id="im-back" type="button" hidden>Back</button>
+        <span class="spacer"></span>
+        <button id="im-cancel" type="button" title="Esc">Cancel</button>
+        <button id="im-ok" type="button" class="primary">Preview</button>
+      </div>
     </dialog>
 
     <dialog id="prompt-dialog" aria-labelledby="prompt-title">

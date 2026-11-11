@@ -1,18 +1,21 @@
 // SeaQull worker: a separate Node process (execution: trusted-worker). All network and database I/O
 // lives here; the .sql console runs in a sandboxed frame with no network and reaches it through
 // plugin.request (handlers below).
+import { createHash } from 'node:crypto'
 import type { Connection } from 'tedious'
 import type { PluginRequestInput, PluginRequestOutput, PluginRequests } from 'orca'
 import type { Activate, PanelRequestContext } from 'orca/worker'
 import type { ConnectionConfig, ConnectionInput, ConnectionTestResult, TreeNode } from '../src/protocol.ts'
 import { clearTokenCache, getSqlAccessToken } from './az.ts'
 import { completionColumns, completionNames, MAX_COLUMN_OBJECTS } from './completion.ts'
-import { connectionTree, connectsTheSame, ConnectionStore, normalize } from './connections.ts'
+import { connectionTree, connectsTheSame, ConnectionStore, MAX_CONNECTIONS, normalize, pageOf } from './connections.ts'
+import { exportConnections, importOutcome, ImportStaging, planImport } from './transfer.ts'
+import { jsonFit } from '../src/shared/json-bytes.ts'
 import { columnNodes, databaseNodes, decodeKey, folderNodes, listDatabases, objectNodes, schemaNodes } from './metadata.ts'
 import { splitGroup } from '../src/shared/tree-keys.ts'
 import { isClosed, isLoginRefused, openConnection, queryRows, type Credentials, type Endpoint } from './mssql.ts'
 import { ActivityIndicator } from './activity.ts'
-import { RunManager, type SessionMemory } from './runs.ts'
+import { EXPORT_CHUNK_BYTES, RunManager, type SessionMemory } from './runs.ts'
 
 const DEFAULT_MAX_ROWS = 10_000
 const SESSIONS_KEY = 'sessions'
@@ -114,9 +117,12 @@ const activate: Activate = async (orca) => {
     return open(config, database ?? config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS })
   })
 
-  handle('connections.list', async () =>
-    Promise.all((await store.list()).map(async (c) => (c.auth.kind === 'sql' && (await store.passwordSaved(c.id)) ? { ...c, passwordSaved: true } : c)))
-  )
+  handle('connections.list', async ({ offset }) => {
+    const all = await store.list()
+    const { items, next } = pageOf(all, offset ?? 0)
+    const connections = await Promise.all(items.map(async (c) => (c.auth.kind === 'sql' && (await store.passwordSaved(c.id)) ? { ...c, passwordSaved: true } : c)))
+    return { connections, next, version: createHash('sha256').update(JSON.stringify(all)).digest('hex').slice(0, 16) }
+  })
 
   handle('connections.save', async (input) => {
     const before = input.id ? (await store.list()).find((c) => c.id === input.id) : undefined
@@ -141,6 +147,29 @@ const activate: Activate = async (orca) => {
   handle('connections.signInState', async ({ id }) => store.signInState(id))
   handle('connections.signIn', async ({ id, user, password, remember }) => {
     await store.signIn(id, user, password, remember === true)
+    return { ok: true as const }
+  })
+
+  handle('connections.export', async ({ folder, offset }) => {
+    const { text, count } = exportConnections(await store.list(), typeof folder === 'string' && folder ? folder : undefined)
+    if (!Number.isInteger(offset) || offset < 0 || offset > text.length) throw Object.assign(new Error('offset is out of range'), { code: 'invalid_params' })
+    const [end] = jsonFit(text, offset, EXPORT_CHUNK_BYTES)
+    return { text: text.slice(offset, end), next: end < text.length ? end : null, length: text.length, count }
+  })
+  const imports = new ImportStaging()
+  handle('connections.importAppend', async ({ importId, entries }) => imports.append(importId, entries))
+  handle('connections.importPlan', async ({ importId, offset }) => {
+    const saved = await store.list()
+    const { items, next } = pageOf(planImport(saved, imports.entries(importId)).items, offset ?? 0)
+    return { items, next, room: Math.max(0, MAX_CONNECTIONS - saved.length) }
+  })
+  handle('connections.importApply', async ({ importId }) => {
+    const outcome = importOutcome(await store.importConnections(imports.entries(importId)))
+    imports.drop(importId)
+    return outcome
+  })
+  handle('connections.importDrop', async ({ importId }) => {
+    imports.drop(importId)
     return { ok: true as const }
   })
 

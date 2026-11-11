@@ -27,6 +27,9 @@ export type ExplorerActions = {
   editConnection(connectionId: string): void
   deleteConnection(connectionId: string): void
   renameFolder(folder: string): void
+  /** All connections, or a folder's and its subfolders'. */
+  exportConnections(folder?: string): void
+  importConnections(): void
   /** The connection's folder, if it has one. */
   folderOf(connectionId: string): string | undefined
 }
@@ -302,11 +305,23 @@ export class Explorer {
     if (this.children.get('')?.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'tree-empty'
-      empty.textContent = 'No connections yet.'
+      const glyph = document.createElement('span')
+      glyph.className = 'tree-empty-icon'
+      glyph.innerHTML = icon('connection')
+      const title = document.createElement('p')
+      title.className = 'tree-empty-title'
+      title.textContent = 'No connections yet'
+      const text = document.createElement('p')
+      text.className = 'tree-empty-text'
+      text.textContent = 'Add a SQL Server connection to browse its databases and run queries.'
       const add = document.createElement('button')
-      add.textContent = 'Add a connection'
+      add.className = 'primary'
+      add.textContent = 'Add connection'
       add.onclick = () => this.actions.newConnection()
-      empty.append(document.createElement('br'), add)
+      const restore = document.createElement('button')
+      restore.textContent = 'Import from file…'
+      restore.onclick = () => this.actions.importConnections()
+      empty.append(glyph, title, text, add, restore)
       fragment.append(empty)
     }
     this.root.replaceChildren(fragment)
@@ -386,7 +401,14 @@ export class Explorer {
   }
 
   private openMenu(node: TreeNode | undefined, x: number, y: number): void {
-    const items = node ? this.menuFor(node) : [{ label: 'New connection…', run: () => this.actions.newConnection() }]
+    const items: MenuItem[] = node
+      ? this.menuFor(node)
+      : [
+          { label: 'New connection…', run: () => this.actions.newConnection() },
+          { separator: true },
+          { label: 'Export connections…', run: () => this.actions.exportConnections() },
+          { label: 'Import connections…', run: () => this.actions.importConnections() }
+        ]
     showMenu(items, x, y, () => this.root.focus({ preventScroll: true }))
   }
 
@@ -398,7 +420,8 @@ export class Explorer {
     if (node.kind === 'group' && folder) {
       items.push(
         { label: 'New connection in this folder…', run: () => this.actions.newConnection(folder) },
-        { label: 'Rename folder…', run: () => this.actions.renameFolder(folder) }
+        { label: 'Rename folder…', run: () => this.actions.renameFolder(folder) },
+        { label: 'Export folder…', run: () => this.actions.exportConnections(folder) }
       )
     }
     const name = sqlName(path, this.current.connectionId === connectionId ? this.current.database : undefined)

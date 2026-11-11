@@ -15,6 +15,8 @@ import { selectTopSql, sqlName, type TreePath } from '../src/shared/tree-keys.ts
 import { isWorkbookText, newId, nextTabName, parseWorkbook, serializeWorkbook, type WorkbookTab } from '../src/shared/workbook.ts'
 import { confirmDialog, openConnectionDialog, promptDialog, signInDialog } from './connection-dialog.ts'
 import { Explorer } from './explorer.ts'
+import { importedText, openImportDialog } from './import-dialog.ts'
+import { showMenu } from './menu.ts'
 import { Grid, type CopyKind, type Range } from './grid.ts'
 import { icon } from './icons.ts'
 import { columnsFor, forgetNames, namesFor } from './name-cache.ts'
@@ -50,6 +52,7 @@ const ui = {
   explorerRefresh: $<HTMLButtonElement>('explorer-refresh'),
   explorerCollapse: $<HTMLButtonElement>('explorer-collapse'),
   explorerSide: $<HTMLButtonElement>('explorer-side'),
+  explorerMore: $<HTMLButtonElement>('explorer-more'),
   tree: $<HTMLDivElement>('tree'),
   queryTabs: $<HTMLElement>('query-tabs'),
   connection: $<HTMLSelectElement>('connection'),
@@ -520,8 +523,30 @@ function renderColor(): void {
 
 const databaseLists = new Map<string, Promise<string[]>>()
 
+/** All saved connections, in as many requests as their size needs; started again (a few times at
+ *  most) when they change between pages. */
+async function listConnections(): Promise<SavedConnection[]> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const all: SavedConnection[] = []
+    let version: string | undefined
+    let changed = false
+    for (let offset: number | null = 0; offset !== null; ) {
+      const page: { connections: SavedConnection[]; next: number | null; version: string } = await request('connections.list', { offset })
+      if (version !== undefined && page.version !== version) {
+        changed = true
+        break
+      }
+      version = page.version
+      all.push(...page.connections)
+      offset = page.next
+    }
+    if (!changed) return all
+  }
+  throw new Error('The connections kept changing while loading them: try again.')
+}
+
 async function loadConnections(): Promise<void> {
-  connections = await request('connections.list', {})
+  connections = await listConnections()
   databaseLists.clear()
   // Unfiled connections first, then one group per folder (optgroups cannot nest: full paths).
   const byFolder = new Map<string, ConnectionConfig[]>()
@@ -531,7 +556,7 @@ async function loadConnections(): Promise<void> {
     byFolder.get(folder)!.push(c)
   }
   ui.connection.replaceChildren(
-    option('', connections.length ? 'Choose a connection…' : 'No connections yet: add one in the explorer'),
+    option('', connections.length ? 'Choose a connection…' : 'No connections'),
     ...(byFolder.get('') ?? []).map((c) => option(c.id, c.name)),
     ...[...byFolder.keys()]
       .filter(Boolean)
@@ -945,7 +970,8 @@ function syncCopyButton(hasSelection: boolean): void {
 // Both need a click or key press in the last few seconds (Chromium's transient activation). A
 // large result can take longer to fetch; then a dialog asks for one more click.
 
-type Prepared = { key: string; fileName: string; mimeType: string; text: string; rows: number; what: string }
+/** `saved`: the status once saved, when not "Saved <file name>". */
+type Prepared = { key: string; fileName: string; mimeType: string; text: string; rows: number; what: string; saved?: string }
 let prepared: Prepared | null = null
 let pending: { action: 'copy' | 'save'; data: Prepared } | null = null
 
@@ -1073,7 +1099,7 @@ async function savePrepared(data: Prepared): Promise<Outcome> {
   }
   try {
     const { status: saved } = await orca.files.saveAs({ suggestedName: data.fileName, mimeType: data.mimeType, data: data.text })
-    setStatus(saved === 'saved' ? `Saved ${data.fileName}` : 'Save cancelled')
+    setStatus(saved === 'saved' ? (data.saved ?? `Saved ${data.fileName}`) : 'Save cancelled')
     return 'done'
   } catch (err) {
     if ((err as { code?: string }).code === 'not_permitted') return 'again'
@@ -1227,7 +1253,7 @@ function connectionsChanged(): Promise<void> {
 
 async function editConnection(connectionId?: string, folder?: string): Promise<void> {
   // Fresh from the worker: a sign-in may have saved a user since the list was loaded.
-  const latest = connectionId ? await request('connections.list', {}).catch(() => connections) : connections
+  const latest = connectionId ? await listConnections().catch(() => connections) : connections
   const existing = latest.find((c) => c.id === connectionId)
   if (connectionId && !existing) return void connectionsChanged()
   const folders = folderPaths(latest.map((c) => c.folder))
@@ -1376,6 +1402,8 @@ const explorer = new Explorer(ui.tree, {
   editConnection: (id) => void editConnection(id),
   deleteConnection: (id) => void deleteConnection(id),
   renameFolder: (folder) => void renameFolder(folder),
+  exportConnections: (folder) => void exportConnections(folder),
+  importConnections: () => importConnections(),
   folderOf: (connectionId) => connections.find((c) => c.id === connectionId)?.folder
 })
 
@@ -1384,6 +1412,43 @@ ui.explorerAdd.innerHTML = icon('add')
 ui.explorerLocate.innerHTML = icon('locate')
 ui.explorerRefresh.innerHTML = icon('refresh')
 ui.explorerCollapse.innerHTML = icon('collapse')
+ui.explorerMore.innerHTML = icon('dots')
+ui.explorerMore.addEventListener('click', () => {
+  const box = ui.explorerMore.getBoundingClientRect()
+  showMenu(
+    [
+      { label: 'Export connections…', run: () => void exportConnections() },
+      { label: 'Import connections…', run: importConnections }
+    ],
+    box.left,
+    box.bottom + 2,
+    () => ui.explorerMore.focus()
+  )
+})
+
+const importConnections = () => openImportDialog((outcome) => void connectionsChanged().then(() => setStatus(importedText(outcome))))
+
+/** Saves the connections (of a folder and its subfolders) to a file: no ids, no passwords. */
+async function exportConnections(folder?: string): Promise<void> {
+  try {
+    let text = ''
+    let length = -1
+    let count = 0
+    for (let offset: number | null = 0; offset !== null; ) {
+      const chunk: { text: string; next: number | null; length: number; count: number } = await request('connections.export', { ...(folder ? { folder } : {}), offset })
+      if (length !== -1 && chunk.length !== length) throw new Error('The connections changed while exporting: try again.')
+      ;({ length, count } = chunk)
+      text += chunk.text
+      offset = chunk.next
+    }
+    if (count === 0) return setStatus(folder ? `No connections in ${folder}.` : 'No connections to export.')
+    const fileName = folder ? `seaqull-${folder.replace(/[\\/]+/g, '-').replace(/[^\w.-]+/g, '_')}.json` : 'seaqull-connections.json'
+    const what = `${count.toLocaleString()} connection${count === 1 ? '' : 's'}`
+    await deliver('save', { key: '', fileName, mimeType: 'application/json', text, rows: count, what, saved: `Exported ${what} (passwords are not included)` })
+  } catch (err) {
+    setStatus(`Export failed: ${errorText(err)}`, true)
+  }
+}
 ui.explorerSide.innerHTML = icon('swap')
 ui.explorerAdd.addEventListener('click', () => void editConnection(undefined, explorer.selectedFolder()))
 ui.explorerLocate.addEventListener('click', () => void locate())

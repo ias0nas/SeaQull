@@ -302,3 +302,27 @@ test("a refused login's reason is shown for a short while only", async (t) => {
   t.mock.timers.tick(60_000)
   assert.deepEqual(await store.signInState(config.id), { needed: true, name: 'Local', user: 'bob' })
 })
+
+test('renaming a folder keeps to the folder limits: one that would break them is refused, and nothing moves', async () => {
+  await store.save(input({ name: 'A1', folder: 'A/B' }))
+  await store.save(input({ name: 'A2', folder: 'A' }))
+  const before = JSON.stringify(storage.get('connections'))
+  const deep = Array.from({ length: 10 }, (_, i) => `L${i}`).join('/')
+  await assert.rejects(store.renameFolder('A', deep), /at most 10 levels/, 'A/B would become 11 levels')
+  await assert.rejects(store.renameFolder('A', 'x'.repeat(5000)), /at most 255 characters/)
+  await assert.rejects(store.renameFolder('A', 'bad\u0007name'), /control characters/)
+  assert.equal(JSON.stringify(storage.get('connections')), before)
+  assert.equal(await store.renameFolder('A', Array.from({ length: 9 }, (_, i) => `L${i}`).join('/')), 2)
+})
+
+test('a remembered sign-in is saved for a connection from before the field limits, without checking its other fields', async () => {
+  const legacy = { ...normalize(input({ auth: { kind: 'sql', user: '' } })), name: 'n'.repeat(300) }
+  storage.set('connections', [legacy])
+  assert.throws(() => normalize(legacy), /Name must be at most 128/)
+  await store.signIn(legacy.id, 'bob', 's3cret', true)
+  assert.equal(await store.loginAccepted(legacy.id, await store.sqlLogin(legacy)), true)
+  const saved = await store.get(legacy.id)
+  assert.deepEqual(saved, { ...legacy, auth: { kind: 'sql', user: 'bob' } })
+  assert.equal(secrets.get(`password:${legacy.id}`), 's3cret')
+  assert.deepEqual(await store.sqlLogin(saved), { user: 'bob', password: 's3cret', remembered: true })
+})

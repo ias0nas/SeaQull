@@ -31,6 +31,9 @@ leaving Orca.
 - **Connection folders.** Give a connection a folder such as `Clients/Acme` to group it in the
   explorer and the connection picker. Names stay unique across folders, because workbooks refer
   to connections by name.
+- **Export and import connections** as a JSON file, all of them or one folder, to move them to
+  another machine or keep a backup. Passwords are never exported. Imports only add: a connection
+  that is already there is skipped, and one whose name is taken is added as "Name (2)".
 
 ## Requirements
 

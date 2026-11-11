@@ -67,7 +67,7 @@ body {
 #console.colored .picker-icon.connection { color: var(--tab-color); }
 #console.colored #connection { border-color: var(--tab-color); }
 #console.colored #connection:focus-visible { outline-offset: 1px; }
-select, input, button {
+select, input, button, textarea {
   font: inherit; color: inherit;
   background: var(--orca-input, transparent);
   border: 1px solid var(--border); border-radius: var(--orca-radius, 6px);
@@ -80,7 +80,7 @@ option { background: var(--orca-popover, var(--orca-background, Canvas)); color:
 button { cursor: pointer; background: var(--orca-secondary, transparent); color: var(--orca-secondary-foreground, inherit); }
 button.primary { background: var(--orca-primary); color: var(--orca-primary-foreground); border-color: transparent; }
 button:disabled { opacity: 0.5; cursor: default; }
-button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--orca-ring, Highlight); outline-offset: -1px; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--orca-ring, Highlight); outline-offset: -1px; }
 .status { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Takes the free space; when there is none it keeps about 100px while the pickers shrink. */
 .toolbar .status { flex: 1 1 100px; min-width: 0; text-align: left; }
@@ -172,7 +172,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 
 /* --- Explorer ------------------------------------------------------------------------------- */
 /* max-width: a width saved in a wide window must not squeeze the console away in a narrow one. */
-#explorer { flex: 0 0 auto; width: 260px; min-width: 160px; max-width: calc(100vw - 320px); display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--orca-card, Canvas); }
+#explorer { flex: 0 0 auto; container-type: inline-size; width: 260px; min-width: 160px; max-width: calc(100vw - 320px); display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--orca-card, Canvas); }
 #app.explorer-hidden #explorer, #app.explorer-hidden #explorer-splitter { display: none; }
 #app.explorer-right { flex-direction: row-reverse; }
 #app.explorer-right #explorer { border-right: 0; border-left: 1px solid var(--border); }
@@ -180,9 +180,16 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 #explorer-splitter { flex: 0 0 4px; margin-left: -4px; cursor: col-resize; position: relative; z-index: 3; }
 #explorer-splitter:hover { background: var(--orca-accent); }
 .explorer-header { display: flex; align-items: center; gap: 2px; padding: 6px 6px 6px 10px; border-bottom: 1px solid var(--border); min-height: 39px; }
-.explorer-title { flex: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.explorer-title { flex: 1; white-space: nowrap; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 0; width: 26px; min-height: 26px; border-color: transparent; background: transparent; color: var(--muted); }
 .icon-button:hover { background: var(--orca-accent); color: var(--orca-accent-foreground, inherit); }
+/* Above the breakpoint the title stays whole and the buttons give a little; below it a narrow
+   explorer drops the title and keeps every button. */
+@container (max-width: 255px) {
+  .explorer-title { display: none; }
+  .explorer-header { justify-content: flex-end; padding: 6px 4px; gap: 0; }
+  .explorer-header .icon-button { width: 24px; }
+}
 
 #tree { flex: 1 1 auto; overflow: auto; padding: 4px 0; outline: none; font-size: 12.5px; }
 .tree-row { display: flex; align-items: center; gap: 4px; height: 22px; padding-right: 8px; white-space: nowrap; cursor: default; user-select: none; }
@@ -215,7 +222,12 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .kind-error { color: var(--orca-destructive); white-space: normal; height: auto; min-height: 22px; }
 .kind-error > .glyph { color: var(--orca-destructive); }
 .kind-more { color: var(--muted); font-style: italic; }
-.tree-empty { padding: 12px; color: var(--muted); line-height: 2.2; }
+.tree-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px 12px; text-align: center; overflow-wrap: anywhere; }
+.tree-empty-icon { color: var(--muted); opacity: 0.8; display: inline-flex; }
+.tree-empty-icon svg { width: 28px; height: 28px; stroke-width: 1.5; }
+.tree-empty-title { margin: 0; font-weight: 600; font-size: 13px; }
+.tree-empty-text { margin: 0 0 4px; color: var(--muted); font-size: 12px; line-height: 1.45; max-width: 220px; }
+.tree-empty button { width: 100%; max-width: 200px; }
 
 /* --- Menu and dialogs ----------------------------------------------------------------------- */
 .menu {
@@ -280,10 +292,34 @@ dialog h2 { margin: 0 0 4px; font-size: 15px; }
 #confirm-dialog p { margin: 0 0 8px; }
 #ready-dialog, #prompt-dialog, #signin-dialog { width: min(380px, calc(100vw - 32px)); }
 #prompt-note:empty { display: none; }
+#import-dialog { width: min(560px, calc(100vw - 32px)); }
+#import-dialog textarea { font: 12px var(--mono); resize: vertical; width: 100%; box-sizing: border-box; }
+.drop-zone {
+  display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px 12px; font-size: 12.5px; color: var(--muted);
+  border: 1px dashed color-mix(in srgb, var(--orca-foreground, CanvasText) 30%, transparent); border-radius: var(--orca-radius, 6px);
+}
+#import-dialog.dragging .drop-zone { border-color: var(--orca-primary, var(--sel)); background: color-mix(in srgb, var(--orca-primary, var(--sel)) 10%, transparent); }
+#im-summary { margin: 0 0 8px; font-size: 12.5px; }
+.import-list { list-style: none; margin: 0 0 10px; padding: 0; max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--orca-radius, 6px); font-size: 12.5px; }
+.import-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.import-list li:last-child { border-bottom: 0; }
+.import-list .badge { flex: 0 0 auto; font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--orca-muted, #8882); color: var(--muted); }
+.import-list .new .badge { color: #2f9e6a; }
+.import-list .renamed .badge { color: #c08a1e; }
+.import-list .invalid .badge, .import-list .reason { color: var(--orca-destructive); }
+.import-list .badge.risky { color: #c08a1e; background: color-mix(in srgb, #c08a1e 16%, transparent); }
+.import-list .name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-list .where { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 #ready-dialog p { margin: 0 0 8px; }
 .ready-heading { display: flex; align-items: center; gap: 6px; }
 .info { display: inline-flex; color: var(--muted); cursor: help; border-radius: 50%; }
-.danger-button { background: var(--orca-destructive); color: var(--orca-destructive-foreground, white); border-color: transparent; }
+/* Solid with white text, like .primary (white on it stays over 4.5:1 even for a light, salmon
+   destructive token); darker in dark themes. */
+.danger-button { background: color-mix(in srgb, var(--orca-destructive, #dc2626) 70%, black); color: white; border-color: transparent; }
+:root.light .danger-button { background: var(--orca-destructive, #dc2626); }
+button.primary:not(:disabled):hover, .danger-button:not(:disabled):hover { filter: brightness(0.92); }
+button.primary:not(:disabled):active, .danger-button:not(:disabled):active { filter: brightness(0.84); }
+dialog .dialog-buttons button:focus-visible { outline: 2px solid color-mix(in srgb, var(--orca-ring, Highlight) 85%, transparent); outline-offset: 1px; }
 
 .tooltip {
   position: fixed; z-index: 20; max-width: 360px; padding: 5px 8px; pointer-events: none;

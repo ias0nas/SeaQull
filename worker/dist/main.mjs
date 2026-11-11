@@ -17562,13 +17562,13 @@ var require_sha256 = __commonJS({
       computeSha256Hmac: () => computeSha256Hmac2
     });
     module.exports = __toCommonJS2(sha256_exports);
-    var import_node_crypto3 = __require("node:crypto");
+    var import_node_crypto5 = __require("node:crypto");
     async function computeSha256Hmac2(key, stringToSign, encoding) {
       const decodedKey = Buffer.from(key, "base64");
-      return (0, import_node_crypto3.createHmac)("sha256", decodedKey).update(stringToSign).digest(encoding);
+      return (0, import_node_crypto5.createHmac)("sha256", decodedKey).update(stringToSign).digest(encoding);
     }
     async function computeSha256Hash2(content, encoding) {
-      return (0, import_node_crypto3.createHash)("sha256").update(content).digest(encoding);
+      return (0, import_node_crypto5.createHash)("sha256").update(content).digest(encoding);
     }
   }
 });
@@ -17595,10 +17595,10 @@ var require_uuidUtils = __commonJS({
     var __toCommonJS2 = (mod) => __copyProps2(__defProp2({}, "__esModule", { value: true }), mod);
     var uuidUtils_exports = {};
     __export2(uuidUtils_exports, {
-      randomUUID: () => randomUUID4
+      randomUUID: () => randomUUID5
     });
     module.exports = __toCommonJS2(uuidUtils_exports);
-    function randomUUID4() {
+    function randomUUID5() {
       return globalThis.crypto.randomUUID();
     }
   }
@@ -18404,7 +18404,7 @@ var require_commonjs4 = __commonJS({
       isReactNative: () => isReactNative2,
       isWebWorker: () => isWebWorker2,
       objectHasProperty: () => import_typeGuards.objectHasProperty,
-      randomUUID: () => randomUUID4,
+      randomUUID: () => randomUUID5,
       stringToUint8Array: () => stringToUint8Array2,
       uint8ArrayToString: () => uint8ArrayToString2
     });
@@ -18433,7 +18433,7 @@ var require_commonjs4 = __commonJS({
     function isObject2(input) {
       return tspRuntime.isObject(input);
     }
-    function randomUUID4() {
+    function randomUUID5() {
       return tspRuntime.randomUUID();
     }
     var isBrowser2 = tspRuntime.isBrowser;
@@ -18514,7 +18514,7 @@ var require_utils = __commonJS({
       handleMsalError: () => handleMsalError,
       msalToPublic: () => msalToPublic,
       publicToMsal: () => publicToMsal,
-      randomUUID: () => randomUUID4,
+      randomUUID: () => randomUUID5,
       serializeAuthenticationRecord: () => serializeAuthenticationRecord2
     });
     module.exports = __toCommonJS2(utils_exports);
@@ -18597,7 +18597,7 @@ var require_utils = __commonJS({
           return import_msal.LogLevel.Info;
       }
     }
-    function randomUUID4() {
+    function randomUUID5() {
       return (0, import_core_util.randomUUID)();
     }
     function handleMsalError(scopes, error, getTokenOptions) {
@@ -30753,7 +30753,7 @@ var require_clientCertificateCredential = __commonJS({
     });
     module.exports = __toCommonJS2(clientCertificateCredential_exports);
     var import_msalClient = require_msalClient();
-    var import_node_crypto3 = __require("node:crypto");
+    var import_node_crypto5 = __require("node:crypto");
     var import_tenantIdUtils = require_tenantIdUtils();
     var import_logging = require_logging();
     var import_promises4 = __require("node:fs/promises");
@@ -30826,7 +30826,7 @@ var require_clientCertificateCredential = __commonJS({
         );
         let privateKey;
         if (this.certificateConfiguration.certificatePassword !== void 0) {
-          privateKey = (0, import_node_crypto3.createPrivateKey)({
+          privateKey = (0, import_node_crypto5.createPrivateKey)({
             key: parts.certificateContents,
             passphrase: this.certificateConfiguration.certificatePassword,
             format: "pem"
@@ -30851,8 +30851,8 @@ var require_clientCertificateCredential = __commonJS({
       const certificateContents = certificate || await (0, import_promises4.readFile)(certificatePath, "utf8");
       const x5c = sendCertificateChain ? certificateContents : void 0;
       const publicKeys = (0, import_certificatesUtils.extractPemCertificateKeys)(certificateContents);
-      const thumbprint = (0, import_node_crypto3.createHash)("sha1").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
-      const thumbprintSha256 = (0, import_node_crypto3.createHash)("sha256").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
+      const thumbprint = (0, import_node_crypto5.createHash)("sha1").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
+      const thumbprintSha256 = (0, import_node_crypto5.createHash)("sha256").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
       return {
         certificateContents,
         thumbprintSha256,
@@ -34952,7 +34952,7 @@ var require_onBehalfOfCredential = __commonJS({
     var import_logging = require_logging();
     var import_tenantIdUtils = require_tenantIdUtils();
     var import_errors = require_errors();
-    var import_node_crypto3 = __require("node:crypto");
+    var import_node_crypto5 = __require("node:crypto");
     var import_scopeUtils = require_scopeUtils();
     var import_promises4 = __require("node:fs/promises");
     var import_tracing = require_tracing();
@@ -35086,8 +35086,8 @@ var require_onBehalfOfCredential = __commonJS({
         if (publicKeys.length === 0) {
           throw new Error("The file at the specified path does not contain a PEM-encoded certificate.");
         }
-        const thumbprint = (0, import_node_crypto3.createHash)("sha1").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
-        const thumbprintSha256 = (0, import_node_crypto3.createHash)("sha256").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
+        const thumbprint = (0, import_node_crypto5.createHash)("sha1").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
+        const thumbprintSha256 = (0, import_node_crypto5.createHash)("sha256").update(Buffer.from(publicKeys[0], "base64")).digest("hex").toUpperCase();
         return {
           certificateContents,
           thumbprintSha256,
@@ -57427,8 +57427,8 @@ var require_bom_handling = __commonJS({
     "use strict";
     var BOMChar = "\uFEFF";
     exports.PrependBOM = PrependBOMWrapper;
-    function PrependBOMWrapper(encoder, options) {
-      this.encoder = encoder;
+    function PrependBOMWrapper(encoder2, options) {
+      this.encoder = encoder2;
       this.addBOM = true;
     }
     PrependBOMWrapper.prototype.write = function(str) {
@@ -61021,9 +61021,9 @@ var require_lib = __commonJS({
     module.exports.defaultCharSingleByte = "?";
     module.exports.encode = function encode(str, encoding, options) {
       str = "" + (str || "");
-      var encoder = module.exports.getEncoder(encoding, options);
-      var res = encoder.write(str);
-      var trail = encoder.end();
+      var encoder2 = module.exports.getEncoder(encoding, options);
+      var res = encoder2.write(str);
+      var trail = encoder2.end();
       return trail && trail.length > 0 ? Buffer3.concat([res, trail]) : res;
     };
     module.exports.decode = function decode(buf, encoding, options) {
@@ -61094,11 +61094,11 @@ var require_lib = __commonJS({
     };
     module.exports.getEncoder = function getEncoder(encoding, options) {
       var codec = module.exports.getCodec(encoding);
-      var encoder = new codec.encoder(options, codec);
+      var encoder2 = new codec.encoder(options, codec);
       if (codec.bomAware && options && options.addBOM) {
-        encoder = new bomHandling.PrependBOM(encoder, options);
+        encoder2 = new bomHandling.PrependBOM(encoder2, options);
       }
-      return encoder;
+      return encoder2;
     };
     module.exports.getDecoder = function getDecoder(encoding, options) {
       var codec = module.exports.getCodec(encoding);
@@ -69153,6 +69153,9 @@ var require_tedious = __commonJS({
   }
 });
 
+// worker/main.ts
+import { createHash } from "node:crypto";
+
 // worker/az.ts
 import { execFile as execFile2 } from "node:child_process";
 import { access, constants } from "node:fs/promises";
@@ -69973,7 +69976,7 @@ async function addForeignKeys(connection, found, byIndex) {
 }
 
 // worker/connections.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 
 // src/shared/colors.ts
 var HEX_RE = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i;
@@ -69998,6 +70001,147 @@ function movedFolder(folder, from, to) {
   return folder.startsWith(`${from}/`) ? `${to}${folder.slice(from.length)}` : void 0;
 }
 var compareNames = (a, b) => a.localeCompare(b, void 0, { sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0);
+
+// src/shared/connection-file.ts
+var FILE_FORMAT = "seaqull-connections";
+var FILE_VERSION = 1;
+var MAX_IMPORT = 2e3;
+var MAX_CONNECTIONS = MAX_IMPORT;
+var MAX_FILE_BYTES = 8 * 1024 * 1024;
+function fileConnection(c) {
+  return {
+    name: c.name,
+    ...c.folder ? { folder: c.folder } : {},
+    server: c.server,
+    port: c.port,
+    database: c.database,
+    auth: c.auth.kind === "sql" ? { kind: "sql", ...c.auth.user ? { user: c.auth.user } : {} } : { kind: "entra" },
+    encrypt: c.encrypt,
+    trustServerCertificate: c.trustServerCertificate,
+    ...c.color ? { color: c.color } : {}
+  };
+}
+var connectionsFile = (connections) => `${JSON.stringify({ format: FILE_FORMAT, version: FILE_VERSION, connections: connections.map(fileConnection) }, null, 2)}
+`;
+var encoder = new TextEncoder();
+
+// worker/transfer.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+var IMPORT_TTL_MS = 5 * 6e4;
+var MAX_STAGED = 4;
+var MAX_LISTED_NAME = 200;
+var inFolder = (c, folder) => c.folder === folder || (c.folder ?? "").startsWith(`${folder}/`);
+function exportConnections(connections, folder) {
+  const chosen = folder ? connections.filter((c) => inFolder(c, folder)) : connections;
+  return { text: connectionsFile(chosen), count: chosen.length };
+}
+var sameSettings = (a, b) => a.server === b.server && a.port === b.port && a.database === b.database && a.encrypt === b.encrypt && a.trustServerCertificate === b.trustServerCertificate && a.auth.kind === b.auth.kind;
+var listedName = (name) => typeof name === "string" && name.trim() ? name.trim().slice(0, MAX_LISTED_NAME) : "(no name)";
+function fileInput(entry) {
+  const e = entry ?? {};
+  const auth = e.auth;
+  if (typeof e.name !== "string") throw new Error("No name");
+  if (typeof e.server !== "string") throw new Error("No server");
+  if (auth?.kind !== "sql" && auth?.kind !== "entra") throw new Error("Authentication must be sql or entra");
+  if (auth.user !== void 0 && typeof auth.user !== "string") throw new Error("The user must be text");
+  const port = e.port === void 0 ? 1433 : typeof e.port === "string" && /^\d{1,5}$/.test(e.port) ? Number(e.port) : e.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be a whole number from 1 to 65535");
+  for (const key of ["database", "folder", "color"]) if (e[key] !== void 0 && typeof e[key] !== "string") throw new Error(`${key} must be text`);
+  for (const key of ["encrypt", "trustServerCertificate"]) if (e[key] !== void 0 && typeof e[key] !== "boolean") throw new Error(`${key} must be true or false`);
+  return {
+    name: e.name,
+    server: e.server,
+    port,
+    database: e.database ?? "",
+    auth: auth.kind === "sql" ? { kind: "sql", user: auth.user ?? "" } : { kind: "entra" },
+    encrypt: e.encrypt !== false,
+    trustServerCertificate: e.trustServerCertificate === true,
+    ...typeof e.folder === "string" ? { folder: e.folder } : {},
+    ...typeof e.color === "string" ? { color: e.color } : {}
+  };
+}
+function planImport(saved, entries) {
+  const byName = new Map(saved.map((c) => [c.name, c]));
+  const items = [];
+  const added = [];
+  for (const entry of entries) {
+    const name = listedName(entry?.name);
+    let config;
+    try {
+      if (entry?.tooLarge === true) throw new Error("Too large");
+      const input = fileInput(entry);
+      if (input.color?.trim() && !normalizeColor(input.color)) throw new Error("The colour must be #rrggbb");
+      config = { ...normalize(input), id: randomUUID2() };
+    } catch (err) {
+      items.push({ status: "invalid", name, reason: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    const place = { server: config.server, ...config.folder ? { folder: config.folder } : {} };
+    const risky = [...config.encrypt ? [] : ["not encrypted"], ...config.trustServerCertificate ? ["trusts any certificate"] : []];
+    const copy = new RegExp(`^${config.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(\\d+\\)$`);
+    const same = [...byName.values()].find((c) => (c.name === config.name || copy.test(c.name)) && sameSettings(c, config));
+    if (same) {
+      items.push({ status: "existing", name: config.name, ...same.name !== config.name ? { newName: same.name } : {}, ...place });
+      continue;
+    }
+    let newName = config.name;
+    for (let n = 2; byName.has(newName); n++) newName = `${config.name} (${n})`;
+    const final = { ...config, name: newName };
+    byName.set(newName, final);
+    added.push(final);
+    const flags = risky.length ? { risky } : {};
+    items.push(newName === config.name ? { status: "new", name: config.name, ...place, ...flags } : { status: "renamed", name: config.name, newName, ...place, ...flags });
+  }
+  return { items, added };
+}
+function importOutcome({ items, added }) {
+  const count = (status) => items.filter((i) => i.status === status).length;
+  return {
+    added: added.length,
+    renamed: count("renamed"),
+    existing: count("existing"),
+    invalid: count("invalid"),
+    sqlLogins: added.filter((c) => c.auth.kind === "sql").length
+  };
+}
+var expired = () => Object.assign(new Error("That import expired: choose the file again."), { code: "invalid_params" });
+var ImportStaging = class {
+  imports = /* @__PURE__ */ new Map();
+  ttlMs;
+  constructor(ttlMs = IMPORT_TTL_MS) {
+    this.ttlMs = ttlMs;
+  }
+  append(importId, entries) {
+    if (!Array.isArray(entries)) throw Object.assign(new Error("entries must be a list"), { code: "invalid_params" });
+    const id = importId ?? randomUUID2();
+    const staged = importId ? this.imports.get(importId) : void 0;
+    if (importId && !staged) throw expired();
+    const list = staged?.entries ?? [];
+    if (list.length + entries.length > MAX_IMPORT) throw Object.assign(new Error(`SeaQull imports at most ${MAX_IMPORT} connections at a time.`), { code: "invalid_params" });
+    if (!staged) {
+      for (const old of [...this.imports.keys()].slice(0, Math.max(0, this.imports.size - MAX_STAGED + 1))) this.drop(old);
+    } else clearTimeout(staged.timer);
+    list.push(...entries);
+    const timer = setTimeout(() => this.imports.delete(id), this.ttlMs);
+    timer.unref?.();
+    this.imports.set(id, { entries: list, timer });
+    return { importId: id, count: list.length };
+  }
+  entries(importId) {
+    const staged = this.imports.get(importId);
+    if (!staged) throw expired();
+    return staged.entries;
+  }
+  drop(importId) {
+    const staged = this.imports.get(importId);
+    if (!staged) return;
+    clearTimeout(staged.timer);
+    this.imports.delete(importId);
+  }
+  get size() {
+    return this.imports.size;
+  }
+};
 
 // worker/connections.ts
 var STORAGE_KEY = "connections";
@@ -70090,8 +70234,13 @@ var ConnectionStore = class {
     return this.serialized(async () => {
       const given = this.signedIn.get(id);
       if (login.remembered || !given?.remember || given.user !== login.user || given.password !== login.password) return false;
-      const config = await this.get(id);
-      await this.saveNow({ ...config, auth: { kind: "sql", user: given.user }, password: given.password });
+      await this.orca.secrets.set(passwordKey(id), given.password);
+      this.hasPassword.set(id, true);
+      const all = await this.list();
+      if (!all.some((c) => c.id === id)) return false;
+      await this.orca.storage.set(STORAGE_KEY, all.map((c) => c.id === id ? { ...c, auth: { kind: "sql", user: given.user } } : c));
+      this.signedIn.delete(id);
+      this.refused.delete(id);
       return true;
     });
   }
@@ -70109,6 +70258,19 @@ var ConnectionStore = class {
     }
     return saved;
   }
+  /** Adds what a connections file has that is not saved yet, in one write (see transfer.ts). */
+  importConnections(entries) {
+    return this.serialized(async () => {
+      const all = await this.list();
+      const { items, added } = planImport(all, entries);
+      const room = Math.max(0, MAX_CONNECTIONS - all.length);
+      if (added.length > room) {
+        throw invalid(`Only ${room.toLocaleString("en-US")} more connections fit (SeaQull keeps at most ${MAX_CONNECTIONS.toLocaleString("en-US")}), and this file would add ${added.length.toLocaleString("en-US")}.`);
+      }
+      if (added.length > 0) await this.orca.storage.set(STORAGE_KEY, [...all, ...added]);
+      return { items, added };
+    });
+  }
   /** How many connections moved. */
   renameFolder(from, to) {
     return this.serialized(async () => {
@@ -70120,6 +70282,7 @@ var ConnectionStore = class {
       const next = (await this.list()).map((c) => {
         const folder = movedFolder(c.folder, source, target);
         if (folder === void 0) return c;
+        checkFolder(folder);
         moved++;
         return { ...c, folder };
       });
@@ -70133,6 +70296,7 @@ var ConnectionStore = class {
     const all = await this.list();
     if (all.some((c) => c.name === config.name && c.id !== config.id)) throw invalid(`A connection named "${config.name}" already exists`);
     const before = all.find((c) => c.id === config.id);
+    if (!before && all.length >= MAX_CONNECTIONS) throw invalid(`SeaQull keeps at most ${MAX_CONNECTIONS.toLocaleString("en-US")} connections: delete some to add more`);
     if (config.auth.kind === "sql" && input.password) {
       await this.orca.secrets.set(passwordKey(config.id), input.password);
       this.hasPassword.set(config.id, true);
@@ -70161,30 +70325,56 @@ var ConnectionStore = class {
     return input.id && !input.forgetPassword ? this.orca.secrets.get(passwordKey(input.id)) : null;
   }
 };
+var LIMITS = { name: 128, server: 255, database: 128, user: 128, folder: 255, folderLevels: 10 };
+var CONTROL = /[\u0000-\u001f\u007f]/;
+function checkText(label, value, max) {
+  if (value.length > max) throw invalid(`${label} must be at most ${max} characters`);
+  if (CONTROL.test(value)) throw invalid(`${label} must not contain control characters`);
+}
+function checkFolder(folder) {
+  checkText("Folder", folder, LIMITS.folder);
+  if (folderSegments(folder).length > LIMITS.folderLevels) throw invalid(`Folder must be at most ${LIMITS.folderLevels} levels deep`);
+}
 function normalize(input) {
   const name = input.name?.trim();
   const server = input.server?.trim();
   if (!name) throw invalid("Name is required");
   if (!server) throw invalid("Server is required");
+  checkText("Name", name, LIMITS.name);
+  checkText("Server", server, LIMITS.server);
   const port = Number(input.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw invalid("Port must be 1–65535");
   }
   const color = normalizeColor(input.color);
   const folder = normalizeFolder(input.folder);
+  checkFolder(folder);
   const auth = input.auth?.kind === "entra" ? { kind: "entra" } : { kind: "sql", user: input.auth?.kind === "sql" ? input.auth.user.trim() : "" };
+  if (auth.kind === "sql") checkText("User", auth.user, LIMITS.user);
+  const database = input.database?.trim() ?? "";
+  checkText("Database", database, LIMITS.database);
   return {
-    id: input.id || randomUUID2(),
+    id: input.id || randomUUID3(),
     name,
     server,
     port,
-    database: input.database?.trim() ?? "",
+    database,
     auth,
     encrypt: input.encrypt !== false,
     trustServerCertificate: input.trustServerCertificate === true,
     ...color ? { color } : {},
     ...folder ? { folder } : {}
   };
+}
+function pageOf(items, offset, budget = 7e5) {
+  if (!Number.isInteger(offset) || offset < 0 || offset > items.length) throw invalid("offset is out of range");
+  let end = offset;
+  for (let bytes = 0; end < items.length; end++) {
+    const size = Buffer.byteLength(JSON.stringify(items[end])) + 1;
+    if (end > offset && bytes + size > budget) break;
+    bytes += size;
+  }
+  return { items: items.slice(offset, end), next: end < items.length ? end : null };
 }
 function connectionTree(connections, group = []) {
   const inside = connections.map((c) => ({ c, segments: folderSegments(c.folder) })).filter(({ segments }) => segments.length >= group.length && group.every((g, i) => segments[i] === g));
@@ -70203,6 +70393,32 @@ function connectionTree(connections, group = []) {
     hasChildren: true
   }));
   return [...folders, ...own];
+}
+
+// src/shared/json-bytes.ts
+function jsonUnitAt(text2, i) {
+  const c = text2.charCodeAt(i);
+  if (c === 34 || c === 92) return [2, 1];
+  if (c < 32) return [c === 8 || c === 9 || c === 10 || c === 12 || c === 13 ? 2 : 6, 1];
+  if (c < 128) return [1, 1];
+  if (c < 2048) return [2, 1];
+  if (c >= 55296 && c <= 56319) {
+    const next = text2.charCodeAt(i + 1);
+    if (next >= 56320 && next <= 57343) return [4, 2];
+  }
+  if (c >= 55296 && c <= 57343) return [6, 1];
+  return [3, 1];
+}
+function jsonFit(text2, from, maxBytes) {
+  let bytes = 0;
+  let i = from;
+  while (i < text2.length) {
+    const [b, units] = jsonUnitAt(text2, i);
+    if (bytes + b > maxBytes) break;
+    bytes += b;
+    i += units;
+  }
+  return [i, bytes];
 }
 
 // worker/activity.ts
@@ -70289,7 +70505,7 @@ var ActivityIndicator = class {
 };
 
 // worker/runs.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 
 // src/shared/export.ts
 var EXPORT_FORMATS = [
@@ -70398,32 +70614,6 @@ function toSqlInserts({ columns, tableName }) {
 `,
     tail: ""
   };
-}
-
-// src/shared/json-bytes.ts
-function jsonUnitAt(text2, i) {
-  const c = text2.charCodeAt(i);
-  if (c === 34 || c === 92) return [2, 1];
-  if (c < 32) return [c === 8 || c === 9 || c === 10 || c === 12 || c === 13 ? 2 : 6, 1];
-  if (c < 128) return [1, 1];
-  if (c < 2048) return [2, 1];
-  if (c >= 55296 && c <= 56319) {
-    const next = text2.charCodeAt(i + 1);
-    if (next >= 56320 && next <= 57343) return [4, 2];
-  }
-  if (c >= 55296 && c <= 57343) return [6, 1];
-  return [3, 1];
-}
-function jsonFit(text2, from, maxBytes) {
-  let bytes = 0;
-  let i = from;
-  while (i < text2.length) {
-    const [b, units] = jsonUnitAt(text2, i);
-    if (bytes + b > maxBytes) break;
-    bytes += b;
-    i += units;
-  }
-  return [i, bytes];
 }
 
 // src/shared/sql-script.ts
@@ -70618,7 +70808,7 @@ var RunManager = class {
       this.remember(owner, { at: Date.now() });
     }
     for (const run2 of [...this.runs.values()]) if (run2.owner === owner) this.drop(run2);
-    const run = { id: randomUUID3(), owner, state: "running", startedAt: Date.now(), results: [], messages: [], abort: new AbortController(), bytes: 0, notice };
+    const run = { id: randomUUID4(), owner, state: "running", startedAt: Date.now(), results: [], messages: [], abort: new AbortController(), bytes: 0, notice };
     this.runs.set(run.id, run);
     session.activeRun = run;
     session.lastUsed = Date.now();
@@ -70913,7 +71103,7 @@ var RunManager = class {
     const length = ends[rows.length + 1];
     if (!this.runs.has(runId)) throw invalid2("That result is gone (a newer query replaced it). Run the query again.");
     for (const [id, prepared] of this.exports) if (prepared.runId === runId) this.dropExport(id);
-    const exportId = randomUUID3();
+    const exportId = randomUUID4();
     this.exports.set(exportId, { runId, parts, rows, ends, createdAt: Date.now(), bytes });
     this.keptBytes += bytes;
     const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
@@ -70978,7 +71168,7 @@ var RunManager = class {
     if (id && (!upload || upload.owner !== owner)) throw invalid2("That script upload expired: run again.");
     if (!upload) {
       for (const [other, existing] of this.uploads) if (existing.owner === owner) this.dropUpload(other);
-      id = randomUUID3();
+      id = randomUUID4();
       upload = { owner, parts: [], length: 0, utf8: 0, touched: Date.now() };
       this.uploads.set(id, upload);
     }
@@ -71218,10 +71408,12 @@ var activate = async (orca) => {
     const config = await store.get(connectionId);
     return open2(config, database ?? config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS });
   });
-  handle(
-    "connections.list",
-    async () => Promise.all((await store.list()).map(async (c) => c.auth.kind === "sql" && await store.passwordSaved(c.id) ? { ...c, passwordSaved: true } : c))
-  );
+  handle("connections.list", async ({ offset }) => {
+    const all = await store.list();
+    const { items, next } = pageOf(all, offset ?? 0);
+    const connections = await Promise.all(items.map(async (c) => c.auth.kind === "sql" && await store.passwordSaved(c.id) ? { ...c, passwordSaved: true } : c));
+    return { connections, next, version: createHash("sha256").update(JSON.stringify(all)).digest("hex").slice(0, 16) };
+  });
   handle("connections.save", async (input) => {
     const before = input.id ? (await store.list()).find((c) => c.id === input.id) : void 0;
     const saved = await store.save(input);
@@ -71241,6 +71433,28 @@ var activate = async (orca) => {
   handle("connections.signInState", async ({ id }) => store.signInState(id));
   handle("connections.signIn", async ({ id, user, password, remember }) => {
     await store.signIn(id, user, password, remember === true);
+    return { ok: true };
+  });
+  handle("connections.export", async ({ folder, offset }) => {
+    const { text: text2, count } = exportConnections(await store.list(), typeof folder === "string" && folder ? folder : void 0);
+    if (!Number.isInteger(offset) || offset < 0 || offset > text2.length) throw Object.assign(new Error("offset is out of range"), { code: "invalid_params" });
+    const [end] = jsonFit(text2, offset, EXPORT_CHUNK_BYTES);
+    return { text: text2.slice(offset, end), next: end < text2.length ? end : null, length: text2.length, count };
+  });
+  const imports = new ImportStaging();
+  handle("connections.importAppend", async ({ importId, entries }) => imports.append(importId, entries));
+  handle("connections.importPlan", async ({ importId, offset }) => {
+    const saved = await store.list();
+    const { items, next } = pageOf(planImport(saved, imports.entries(importId)).items, offset ?? 0);
+    return { items, next, room: Math.max(0, MAX_CONNECTIONS - saved.length) };
+  });
+  handle("connections.importApply", async ({ importId }) => {
+    const outcome = importOutcome(await store.importConnections(imports.entries(importId)));
+    imports.drop(importId);
+    return outcome;
+  });
+  handle("connections.importDrop", async ({ importId }) => {
+    imports.drop(importId);
     return { ok: true };
   });
   handle("connections.renameFolder", async ({ from, to }) => ({ moved: await store.renameFolder(from, to) }));

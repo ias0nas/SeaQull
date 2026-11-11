@@ -111,7 +111,7 @@ test('a connection without a saved login: requests ask for one; a wrong one give
   const base = { server: 'localhost', port: Number(process.env.MSSQL_PORT ?? 1433), database: '', encrypt: true, trustServerCertificate: true }
   const saved = await call('connections.save', { ...base, name: 'No login', auth: { kind: 'sql', user: '' } })
   try {
-    assert.ok(!(await call('connections.list', {})).find((c: any) => c.id === saved.id).passwordSaved)
+    assert.ok(!(await call('connections.list', {})).connections.find((c: any) => c.id === saved.id).passwordSaved)
     const key = `c:${saved.id}`
     await assert.rejects(call('tree.children', { key }), /Sign in to No login/)
     await assert.rejects(call('databases.list', { connectionId: saved.id }), /Sign in to No login/)
@@ -143,11 +143,11 @@ test('a sign-in to remember is saved only once the server accepts it', async () 
     await call('connections.signIn', { id: saved.id, user: 'sa', password: 'typo', remember: true })
     await assert.rejects(call('tree.children', { key }), /Login failed/)
     assert.ok(![...secrets.keys()].includes(`password:${saved.id}`), 'a refused login is not saved')
-    assert.deepEqual((await call('connections.list', {})).find((c: any) => c.id === saved.id).auth, { kind: 'sql', user: '' })
+    assert.deepEqual((await call('connections.list', {})).connections.find((c: any) => c.id === saved.id).auth, { kind: 'sql', user: '' })
     assert.equal((await call('connections.signInState', { id: saved.id })).needed, true)
     await call('connections.signIn', { id: saved.id, user: 'sa', password: process.env.MSSQL_SA_PASSWORD, remember: true })
     assert.ok((await call('tree.children', { key })).some((n: any) => n.label === 'master'))
-    const listed = (await call('connections.list', {})).find((c: any) => c.id === saved.id)
+    const listed = (await call('connections.list', {})).connections.find((c: any) => c.id === saved.id)
     assert.deepEqual([listed.auth, listed.passwordSaved], [{ kind: 'sql', user: 'sa' }, true])
   } finally {
     await call('connections.delete', { id: saved.id })
@@ -166,6 +166,38 @@ test('a sign-in whose database cannot be opened is kept: only a refused login is
   } finally {
     await call('connections.delete', { id: saved.id })
   }
+})
+
+test('export, then import the file: the saved connections are already there, a renamed copy is added once', async () => {
+  let text = ''
+  for (let offset: number | null = 0; offset !== null; ) {
+    const chunk: { text: string; next: number | null } = await call('connections.export', { offset })
+    text += chunk.text
+    offset = chunk.next
+  }
+  assert.ok(!text.includes(process.env.MSSQL_SA_PASSWORD!) && !text.includes('"id"'))
+  const file = JSON.parse(text)
+  const stage = async (connections: unknown[]) => (await call('connections.importAppend', { entries: connections })).importId
+  const plan = await call('connections.importPlan', { importId: await stage(file.connections) })
+  assert.ok(plan.items.every((i: any) => i.status === 'existing'), JSON.stringify(plan.items))
+  const changed = { ...file.connections[0], server: 'elsewhere' }
+  const id = await stage([changed])
+  const preview = await call('connections.importPlan', { importId: id })
+  assert.equal(preview.items[0].status, 'renamed')
+  assert.deepEqual(await call('connections.importApply', { importId: id }), { added: 1, renamed: 1, existing: 0, invalid: 0, sqlLogins: 1 })
+  const added = (await call('connections.list', {})).connections.find((c: any) => c.name === preview.items[0].newName)
+  assert.equal(added.server, 'elsewhere')
+  await assert.rejects(call('connections.importApply', { importId: id }), /expired/)
+  await call('connections.delete', { id: added.id })
+})
+
+test('connections.list pages carry a version that changes when the list does', async () => {
+  const first = await call('connections.list', {})
+  assert.match(first.version, /^[0-9a-f]{16}$/)
+  assert.equal((await call('connections.list', {})).version, first.version)
+  const extra = await call('connections.save', { name: 'Version bump', server: 'x', port: 1433, database: '', auth: { kind: 'entra' }, encrypt: true, trustServerCertificate: false })
+  assert.notEqual((await call('connections.list', {})).version, first.version)
+  await call('connections.delete', { id: extra.id })
 })
 
 test('tree errors come back as an error node', async () => {
@@ -234,7 +266,7 @@ test('saving only a new colour or name keeps open sessions (temp tables survive)
   }
   const first = await call('query.run', { consoleId: 'tab-keep', connectionId, database: '', sql: 'CREATE TABLE #kept (n int)', firstLine: 1 })
   await wait(first.runId)
-  const [config] = await call('connections.list', {})
+  const [config] = (await call('connections.list', {})).connections
   await call('connections.save', { ...config, color: '#3fb950', name: 'Local (green)' })
   const second = await call('query.run', { consoleId: 'tab-keep', connectionId, database: '', sql: "SELECT OBJECT_ID('tempdb..#kept') AS t", firstLine: 1 })
   await wait(second.runId)

@@ -42,6 +42,24 @@ export type ConnectionTestResult =
   | { ok: true; ms: number; serverVersion: string; login: string }
   | { ok: false; error: string }
 
+/** What importing one entry of a connections file does: `existing` (the same name and connection
+ *  settings are already saved: skipped), `renamed` (its name is taken: saved as `newName`), or
+ *  `invalid` (skipped, `reason` says why). */
+export type ImportItem = {
+  status: 'new' | 'renamed' | 'existing' | 'invalid'
+  name: string
+  newName?: string
+  server?: string
+  folder?: string
+  reason?: string
+  /** Settings worth a second look in a file from someone else: "not encrypted", "trusts any certificate". */
+  risky?: string[]
+}
+
+/** What an import did. `added` includes the renamed ones; `sqlLogins`: added ones that sign in
+ *  with a SQL login (their passwords are asked for when connecting). */
+export type ImportOutcome = { added: number; renamed: number; existing: number; invalid: number; sqlLogins: number }
+
 export type TreeNodeKind =
   /** A folder of connections ('folder' is Tables, Views and the like). */
   | 'group'
@@ -163,7 +181,9 @@ export type ObjectColumns = ObjectName & {
 declare module 'orca' {
   // Declaration merging needs an interface.
   interface PluginRequests {
-    'connections.list': { input: Record<string, never>; output: SavedConnection[] }
+    /** From `offset` (0 when absent), as many as fit in an answer; `next` null after the last.
+     *  `version` changes whenever the list does: pages with different versions do not belong together. */
+    'connections.list': { input: { offset?: number }; output: { connections: SavedConnection[]; next: number | null; version: string } }
     'connections.save': { input: ConnectionInput; output: ConnectionConfig }
     'connections.delete': { input: { id: string }; output: { ok: true } }
     'connections.test': { input: ConnectionInput; output: ConnectionTestResult }
@@ -174,6 +194,23 @@ declare module 'orca' {
      *  database or login settings change (not its name, colour or folder). `remember`: saved with
      *  the connection once the server accepts them. */
     'connections.signIn': { input: { id: string; user: string; password: string; remember: boolean }; output: { ok: true } }
+    /** A connections file (src/shared/connection-file.ts) of all connections, or of a folder and its
+     *  subfolders: the text from `offset`, as much as fits in an answer; `next` null after the last. */
+    'connections.export': {
+      input: { folder?: string; offset: number }
+      output: { text: string; next: number | null; length: number; count: number }
+    }
+    /** Part of a connections file's entries, as the page read them (requests are capped at
+     *  64 KiB). No `importId` starts an import; one not used within 5 minutes is dropped. */
+    'connections.importAppend': { input: { importId?: string; entries: unknown[] }; output: { importId: string; count: number } }
+    /** What importing would do, entry by entry from `offset`, against the connections saved now;
+     *  `room`: how many more connections fit. */
+    'connections.importPlan': { input: { importId: string; offset?: number }; output: { items: ImportItem[]; next: number | null; room: number } }
+    /** Imports: adds the new and renamed connections (new ids) in one write, never changing or
+     *  removing saved ones, and says what it did (names decided now, not at the preview). */
+    'connections.importApply': { input: { importId: string }; output: ImportOutcome }
+    /** Forgets a staged import (the preview was cancelled). */
+    'connections.importDrop': { input: { importId: string }; output: { ok: true } }
     /** Moves every connection in the folder `from` (and its subfolders) to `to`, merging into a
      *  folder of that name if there is one. */
     'connections.renameFolder': { input: { from: string; to: string }; output: { moved: number } }
