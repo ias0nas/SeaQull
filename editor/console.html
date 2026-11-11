@@ -54,6 +54,7 @@
       <form class="dialog-form">
         <h2 id="cd-title">New connection</h2>
         <label class="stack">Name<input id="cd-name" required placeholder="Local SQL Server" /></label>
+        <label class="stack">Folder (optional)<input id="cd-folder" placeholder="Clients/Acme" spellcheck="false" /></label>
         <div class="stack">Colour
           <div class="colors">
             <div id="cd-swatches" class="swatches" role="radiogroup" aria-label="Colour"></div>
@@ -72,9 +73,10 @@
           </select>
         </label>
         <div id="cd-sql-fields" class="row">
-          <label class="stack grow">User<input id="cd-user" autocomplete="off" /></label>
+          <label class="stack grow">User<input id="cd-user" autocomplete="off" spellcheck="false" /></label>
           <label class="stack grow">Password<input id="cd-password" type="password" autocomplete="off" /></label>
         </div>
+        <label id="cd-forget-row" class="check" hidden><input id="cd-forget" type="checkbox" /> Forget the saved password</label>
         <p id="cd-entra-note" class="note" hidden>Uses your Azure CLI sign-in: run <code>az login</code> first. No password is stored.</p>
         <label class="check"><input id="cd-encrypt" type="checkbox" /> Encrypt connection</label>
         <label class="check"><input id="cd-trust" type="checkbox" /> Trust server certificate (local/dev only)</label>
@@ -97,6 +99,34 @@
         <button id="ready-cancel" type="button" title="Esc">Cancel</button>
         <button id="ready-ok" type="button" class="primary"></button>
       </div>
+    </dialog>
+
+    <dialog id="signin-dialog" aria-labelledby="si-title">
+      <form class="dialog-form">
+        <h2 id="si-title"></h2>
+        <p id="si-status" class="dialog-status" data-tone="danger" hidden></p>
+        <label class="stack">User<input id="si-user" required autocomplete="off" spellcheck="false" /></label>
+        <label class="stack">Password<input id="si-password" type="password" required autocomplete="off" /></label>
+        <label class="check"><input id="si-remember" type="checkbox" /> Remember (password in the OS keychain)</label>
+        <div class="dialog-buttons">
+          <span class="spacer"></span>
+          <button id="si-cancel" type="button" title="Esc">Cancel</button>
+          <button id="si-ok" type="submit" class="primary">Connect</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="prompt-dialog" aria-labelledby="prompt-title">
+      <form class="dialog-form">
+        <h2 id="prompt-title"></h2>
+        <label class="stack"><span id="prompt-label"></span><input id="prompt-input" required spellcheck="false" /></label>
+        <p id="prompt-note" class="note"></p>
+        <div class="dialog-buttons">
+          <span class="spacer"></span>
+          <button id="prompt-cancel" type="button" title="Esc">Cancel</button>
+          <button id="prompt-ok" type="submit" class="primary"></button>
+        </div>
+      </form>
     </dialog>
 
     <dialog id="confirm-dialog">

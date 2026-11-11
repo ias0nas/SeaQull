@@ -4,20 +4,22 @@
 // its own editor, results and SQL session in the worker (named by the tab's id: Orca gives every
 // console page the same caller id, and reloads the page whenever its Orca tab is shown again).
 // Queries run in the worker; this page polls status and pages rows.
-import type { Cell, CellRange, ConnectionConfig, ExportFormat, RunStatus } from '../src/protocol.ts'
+import type { Cell, CellRange, ConnectionConfig, ExportFormat, RunStatus, SavedConnection } from '../src/protocol.ts'
 import { cellText, EXPORT_FORMATS, exportResult } from '../src/shared/export.ts'
+import { compareNames, folderPaths, normalizeFolder } from '../src/shared/folders.ts'
 import { headerEdit, parseHeader } from '../src/shared/sql-script.ts'
 import { locateAt, targetPath } from '../src/shared/locate.ts'
 import { WINDOW } from '../src/shared/sql-statement.ts'
 import { sendRun } from '../src/shared/upload.ts'
 import { selectTopSql, sqlName, type TreePath } from '../src/shared/tree-keys.ts'
 import { isWorkbookText, newId, nextTabName, parseWorkbook, serializeWorkbook, type WorkbookTab } from '../src/shared/workbook.ts'
-import { confirmDialog, openConnectionDialog } from './connection-dialog.ts'
+import { confirmDialog, openConnectionDialog, promptDialog, signInDialog } from './connection-dialog.ts'
 import { Explorer } from './explorer.ts'
 import { Grid, type CopyKind, type Range } from './grid.ts'
 import { icon } from './icons.ts'
 import { columnsFor, forgetNames, namesFor } from './name-cache.ts'
-import { request } from './request.ts'
+import { installSignIn, request } from './request.ts'
+import { isSignInCancelled, SignInGate } from './sign-in.ts'
 import { watchRun } from './run-watch.ts'
 import {
   closeCompletionPopup,
@@ -159,7 +161,7 @@ let workbookExtra: Record<string, unknown> | undefined
 let docCrlf = hasCrlf(doc.value)
 let tabs: Tab[] = []
 let activeId = ''
-let connections: ConnectionConfig[] = []
+let connections: SavedConnection[] = []
 let grid: Grid | null = null
 
 const active = (): Tab => tabs.find((t) => t.id === activeId) ?? tabs[0]
@@ -521,12 +523,29 @@ const databaseLists = new Map<string, Promise<string[]>>()
 async function loadConnections(): Promise<void> {
   connections = await request('connections.list', {})
   databaseLists.clear()
+  // Unfiled connections first, then one group per folder (optgroups cannot nest: full paths).
+  const byFolder = new Map<string, ConnectionConfig[]>()
+  for (const c of [...connections].sort((a, b) => compareNames(a.name, b.name))) {
+    const folder = c.folder ?? ''
+    if (!byFolder.has(folder)) byFolder.set(folder, [])
+    byFolder.get(folder)!.push(c)
+  }
   ui.connection.replaceChildren(
     option('', connections.length ? 'Choose a connection…' : 'No connections yet: add one in the explorer'),
-    ...connections.map((c) => option(c.id, c.name))
+    ...(byFolder.get('') ?? []).map((c) => option(c.id, c.name)),
+    ...[...byFolder.keys()]
+      .filter(Boolean)
+      .sort(compareNames)
+      .map((folder) => {
+        const group = document.createElement('optgroup')
+        group.label = folder
+        group.append(...byFolder.get(folder)!.map((c) => option(c.id, c.name)))
+        return group
+      })
   )
   renderTabBar()
-  await syncPickers()
+  // Not awaited: the database list may wait for a sign-in, which must not hold up the explorer.
+  void syncPickers()
 }
 
 let pickerGeneration = 0
@@ -541,8 +560,9 @@ function pickerTitles(): void {
 ui.connection.addEventListener('change', pickerTitles)
 ui.database.addEventListener('change', pickerTitles)
 
-/** Shows the active tab's connection and database in the toolbar pickers. */
-async function syncPickers(): Promise<void> {
+/** Shows the active tab's connection and database in the toolbar pickers. `byUser`: the person
+ *  chose them, so listing the databases may ask for a sign-in again after a cancel. */
+async function syncPickers(byUser = false): Promise<void> {
   const generation = ++pickerGeneration
   const tab = active()
   const connection = connectionOf(tab)
@@ -560,14 +580,14 @@ async function syncPickers(): Promise<void> {
   let names: string[] = []
   try {
     if (!databaseLists.has(connection.id)) {
-      databaseLists.set(connection.id, request('databases.list', { connectionId: connection.id }, { timeoutMs: 60_000 }))
+      databaseLists.set(connection.id, request('databases.list', { connectionId: connection.id }, { timeoutMs: 60_000 }, byUser))
     }
     names = await databaseLists.get(connection.id)!
     // An earlier connection's failure no longer applies.
     if (tab.statusError && tab.statusText.startsWith('Could not list databases')) setStatus('', false, tab)
   } catch (err) {
     databaseLists.delete(connection.id)
-    setStatus(`Could not list databases: ${errorText(err)}`, true, tab)
+    if (!isSignInCancelled(err)) setStatus(`Could not list databases: ${errorText(err)}`, true, tab)
   }
   if (generation !== pickerGeneration) return // a newer call (tab switch, target change) owns the pickers
   const wanted = tab.database
@@ -589,7 +609,7 @@ async function setTarget(tab: Tab, connectionId: string, database: string): Prom
   writeHeader(tab)
   saveWorkbook()
   renderTabBar()
-  if (tab === active()) await syncPickers()
+  if (tab === active()) await syncPickers(true)
 }
 
 ui.connection.addEventListener('change', () => void setTarget(active(), ui.connection.value, ''))
@@ -684,7 +704,7 @@ async function startRun(tab: Tab, connectionId: string, database: string, sql: s
     void follow(tab, runId)
   } catch (err) {
     setRunning(false, tab)
-    setStatus(errorText(err), true, tab)
+    setStatus(errorText(err), !isSignInCancelled(err), tab)
   }
 }
 
@@ -1205,8 +1225,12 @@ function connectionsChanged(): Promise<void> {
   return refreshing
 }
 
-function editConnection(connectionId?: string): void {
-  const existing = connections.find((c) => c.id === connectionId)
+async function editConnection(connectionId?: string, folder?: string): Promise<void> {
+  // Fresh from the worker: a sign-in may have saved a user since the list was loaded.
+  const latest = connectionId ? await request('connections.list', {}).catch(() => connections) : connections
+  const existing = latest.find((c) => c.id === connectionId)
+  if (connectionId && !existing) return void connectionsChanged()
+  const folders = folderPaths(latest.map((c) => c.folder))
   openConnectionDialog(existing, async (saved) => {
     // A renamed connection: tabs that used the old name follow it.
     if (existing && existing.name !== saved.name) {
@@ -1222,7 +1246,23 @@ function editConnection(connectionId?: string): void {
     // A new connection becomes the active tab's when it has none yet (never on an edit: the tab may
     // use a connection this machine does not have, which an unrelated edit must not replace).
     if (!existing && !active().connectionName) await setTarget(active(), saved.id, '')
+  }, { folder, folders })
+}
+
+async function renameFolder(folder: string): Promise<void> {
+  const others = folderPaths(connections.map((c) => c.folder)).filter((f) => f !== folder && !f.startsWith(`${folder}/`))
+  const to = await promptDialog(`Rename ${folder}`, 'Folder', folder, 'Rename', {
+    suggestions: others,
+    note: 'Use / or \\ for subfolders. An existing folder\'s name moves these connections into it.'
   })
+  if (to === null || normalizeFolder(to) === folder) return
+  try {
+    await request('connections.renameFolder', { from: folder, to })
+    explorer.folderRenamed(folder, normalizeFolder(to))
+  } catch (err) {
+    setStatus(errorText(err), true)
+  }
+  await connectionsChanged()
 }
 
 async function deleteConnection(connectionId: string): Promise<void> {
@@ -1237,8 +1277,70 @@ async function deleteConnection(connectionId: string): Promise<void> {
   await connectionsChanged()
 }
 
+// A connection without a saved login: one prompt, however many requests need it.
+const remembering = new Set<string>()
+/** Connections whose sign-in was cancelled, kept across page reloads (Orca reloads a console's
+ *  page when its tab is shown again) for a while: until then only a user action asks again. */
+const DECLINED_KEY = 'seaqull.signInDeclined'
+const DECLINED_MS = 12 * 60 * 60_000
+const declinedAt = (): Record<string, number> => {
+  try {
+    const all = JSON.parse(storageGet(DECLINED_KEY) ?? '{}') as Record<string, number>
+    return Object.fromEntries(Object.entries(all).filter(([, at]) => typeof at === 'number' && Date.now() - at < DECLINED_MS))
+  } catch {
+    return {}
+  }
+}
+const declined = {
+  has: (id: string) => id in declinedAt(),
+  add: (id: string) => storageSet(DECLINED_KEY, JSON.stringify({ ...declinedAt(), [id]: Date.now() })),
+  delete: (id: string) => {
+    const all = declinedAt()
+    if (!(id in all)) return
+    delete all[id]
+    storageSet(DECLINED_KEY, JSON.stringify(all))
+  }
+}
+/** The Remember box as last left, by connection: asked again after a refused login, it stays. */
+const rememberChoice = new Map<string, boolean>()
+installSignIn(
+  new SignInGate(
+    (id) => request('connections.signInState', { id }),
+    async (id, state) => {
+      for (let failure = state.failure; ; ) {
+        const login = await signInDialog({ ...state, ...(failure ? { failure } : {}) }, rememberChoice.get(id))
+        if (!login) return false
+        rememberChoice.set(id, login.remember)
+        try {
+          await request('connections.signIn', { id, ...login })
+        } catch (err) {
+          failure = errorText(err)
+          continue
+        }
+        if (login.remember) remembering.add(id)
+        else remembering.delete(id)
+        return true
+      }
+    },
+    // A login to remember is saved once the server accepts it (a run connects after its request
+    // returns): reload the connections once it has been.
+    (id) => {
+      if (!remembering.delete(id)) return
+      void (async () => {
+        for (let i = 0; i < 60; i++) {
+          const state = await request('connections.signInState', { id }).catch(() => null)
+          if (!state?.saving) break
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+        await connectionsChanged()
+      })()
+    },
+    declined
+  )
+)
+
 const explorer = new Explorer(ui.tree, {
-  load: (key) => request('tree.children', { key }, { timeoutMs: 60_000 }),
+  load: (key, byUser) => request('tree.children', { key }, { timeoutMs: 60_000 }, byUser),
   use: (connectionId, database) => void setTarget(active(), connectionId, database),
   insert: insertText,
   copy: copyText,
@@ -1270,9 +1372,11 @@ const explorer = new Explorer(ui.tree, {
   },
   ...(workbookMode ? { newTab: (connectionId: string, database: string) => void newTab(connectionId, database) } : {}),
   colorOf,
-  newConnection: () => editConnection(),
-  editConnection,
-  deleteConnection: (id) => void deleteConnection(id)
+  newConnection: (folder) => void editConnection(undefined, folder),
+  editConnection: (id) => void editConnection(id),
+  deleteConnection: (id) => void deleteConnection(id),
+  renameFolder: (folder) => void renameFolder(folder),
+  folderOf: (connectionId) => connections.find((c) => c.id === connectionId)?.folder
 })
 
 ui.explorerToggle.innerHTML = icon('sidebar')
@@ -1281,7 +1385,7 @@ ui.explorerLocate.innerHTML = icon('locate')
 ui.explorerRefresh.innerHTML = icon('refresh')
 ui.explorerCollapse.innerHTML = icon('collapse')
 ui.explorerSide.innerHTML = icon('swap')
-ui.explorerAdd.addEventListener('click', () => editConnection())
+ui.explorerAdd.addEventListener('click', () => void editConnection(undefined, explorer.selectedFolder()))
 ui.explorerLocate.addEventListener('click', () => void locate())
 ui.explorerLocate.title = `Show the object at the cursor, or the tab's database (${keys.locate})`
 

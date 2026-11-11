@@ -1,7 +1,10 @@
 // Requests to the worker. Orca limits how many messages a plugin frame may send (Orca 1.4: 120 in
 // any 10 seconds) and refuses the rest with `rate_limited` and `retryAfterMs`; a long copy or a
-// busy grid can reach that, so such requests wait and try again rather than fail.
+// busy grid can reach that, so such requests wait and try again rather than fail. Requests that
+// connect go through the sign-in gate (sign-in.ts) once the console installs one.
 import type { PluginRequestInput, PluginRequestOutput, PluginRequestOptions, PluginRequests } from 'orca'
+import { decodeKey } from '../src/shared/tree-keys.ts'
+import type { SignInGate } from './sign-in.ts'
 
 /** Waits when a refusal gives no `retryAfterMs`. */
 const BACKOFF_MS = [250, 500, 1000, 2000]
@@ -29,8 +32,34 @@ export async function retryRateLimited<T>(call: () => Promise<T>, wait: (ms: num
   }
 }
 
-/** orca.plugin.request, retried while Orca says too many requests. */
-export function request<K extends keyof PluginRequests>(name: K, input: PluginRequestInput<K>, options?: PluginRequestOptions): Promise<PluginRequestOutput<K>> {
+let gate: SignInGate | undefined
+export const installSignIn = (signIn: SignInGate) => void (gate = signIn)
+
+/** The saved connection a request connects to, if it does. */
+export function connectionOfRequest(name: string, input: unknown): string | undefined {
+  if (name === 'tree.children') {
+    try {
+      return decodeKey(String((input as { key?: unknown }).key ?? '')).connection
+    } catch {
+      return undefined
+    }
+  }
+  if (!['databases.list', 'query.run', 'completion.names', 'completion.columns'].includes(name)) return undefined
+  const id = (input as { connectionId?: unknown } | null)?.connectionId
+  return typeof id === 'string' && id ? id : undefined
+}
+
+/** orca.plugin.request, retried while Orca says too many requests, and after signing in.
+ *  `byUser`: the person asked for it (a run always is), so it may ask for a sign-in again after a
+ *  cancel. */
+export function request<K extends keyof PluginRequests>(
+  name: K,
+  input: PluginRequestInput<K>,
+  options?: PluginRequestOptions,
+  byUser = name === 'query.run'
+): Promise<PluginRequestOutput<K>> {
   const send = orca.plugin.request as (name: K, input: PluginRequestInput<K>, options?: PluginRequestOptions) => Promise<PluginRequestOutput<K>>
-  return retryRateLimited(() => send(name, input, options))
+  const attempt = () => retryRateLimited(() => send(name, input, options))
+  const connectionId = gate && connectionOfRequest(name, input)
+  return connectionId ? gate!.run(connectionId, attempt, byUser) : attempt()
 }

@@ -7,9 +7,10 @@ import type { Activate, PanelRequestContext } from 'orca/worker'
 import type { ConnectionConfig, ConnectionInput, ConnectionTestResult, TreeNode } from '../src/protocol.ts'
 import { clearTokenCache, getSqlAccessToken } from './az.ts'
 import { completionColumns, completionNames, MAX_COLUMN_OBJECTS } from './completion.ts'
-import { ConnectionStore, normalize } from './connections.ts'
-import { columnNodes, databaseNodes, decodeKey, encodeKey, folderNodes, listDatabases, objectNodes, schemaNodes } from './metadata.ts'
-import { isClosed, openConnection, queryRows, type Credentials, type Endpoint } from './mssql.ts'
+import { connectionTree, connectsTheSame, ConnectionStore, normalize } from './connections.ts'
+import { columnNodes, databaseNodes, decodeKey, folderNodes, listDatabases, objectNodes, schemaNodes } from './metadata.ts'
+import { splitGroup } from '../src/shared/tree-keys.ts'
+import { isClosed, isLoginRefused, openConnection, queryRows, type Credentials, type Endpoint } from './mssql.ts'
 import { ActivityIndicator } from './activity.ts'
 import { RunManager, type SessionMemory } from './runs.ts'
 
@@ -78,21 +79,32 @@ const activate: Activate = async (orca) => {
     () => indicator.set(runs.activity())
   )
 
-  const credentialsFor = async (config: ConnectionConfig, typedPassword?: string): Promise<Credentials> => {
-    if (config.auth.kind === 'entra') {
-      const azPath = await orca.settings.get('azPath')
-      return { kind: 'entra', token: await getSqlAccessToken(typeof azPath === 'string' ? azPath : undefined) }
-    }
-    return { kind: 'sql', user: config.auth.user, password: await store.password(config.id, typedPassword) }
+  const entraCredentials = async (): Promise<Credentials> => {
+    const azPath = await orca.settings.get('azPath')
+    return { kind: 'entra', token: await getSqlAccessToken(typeof azPath === 'string' ? azPath : undefined) }
   }
 
-  /** Opens a connection; a failed Entra login drops cached tokens (say after `az login` as someone else). */
-  const open = async (config: ConnectionConfig, database: string, options?: { requestTimeout?: number }, typedPassword?: string) => {
-    const credentials = await credentialsFor(config, typedPassword)
+  /** Opens a connection. A failed Entra login drops cached tokens (say after `az login` as someone
+   *  else); a refused login given at sign-in is forgotten, so the next attempt asks again. */
+  const open = async (config: ConnectionConfig, database: string, options?: { requestTimeout?: number }, password?: string) => {
+    if (config.auth.kind === 'entra') {
+      try {
+        return await openConnection(endpointOf(config, database), await entraCredentials(), options)
+      } catch (err) {
+        clearTokenCache()
+        throw err
+      }
+    }
+    const login = password !== undefined ? { user: config.auth.user, password, remembered: true } : await store.sqlLogin(config)
     try {
-      return await openConnection(endpointOf(config, database), credentials, options)
+      const connection = await openConnection(endpointOf(config, database), { kind: 'sql', user: login.user, password: login.password }, options)
+      if (!login.remembered) await store.loginAccepted(config.id, login).catch((err) => orca.log(`SeaQull: could not save the login: ${err instanceof Error ? err.message : err}`))
+      return connection
     } catch (err) {
-      if (config.auth.kind === 'entra') clearTokenCache()
+      if (isLoginRefused(err) && !login.remembered) {
+        store.loginRefused(config.id, login, err instanceof Error ? err.message : String(err))
+        throw Object.assign(err as Error, { signInRefused: true })
+      }
       throw err
     }
   }
@@ -102,18 +114,20 @@ const activate: Activate = async (orca) => {
     return open(config, database ?? config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS })
   })
 
-  handle('connections.list', async () => store.list())
+  handle('connections.list', async () =>
+    Promise.all((await store.list()).map(async (c) => (c.auth.kind === 'sql' && (await store.passwordSaved(c.id)) ? { ...c, passwordSaved: true } : c)))
+  )
 
   handle('connections.save', async (input) => {
     const before = input.id ? (await store.list()).find((c) => c.id === input.id) : undefined
     const saved = await store.save(input)
     // Only what changes the connection itself resets its sessions (rolling back open transactions,
     // dropping temp tables); a new name or colour does not.
-    const reconnect = !before || !!input.password || JSON.stringify(endpointOf(before)) !== JSON.stringify(endpointOf(saved)) || JSON.stringify(before.auth) !== JSON.stringify(saved.auth)
+    const reconnect = !before || !!input.password || !connectsTheSame(before, saved)
     if (reconnect) {
       meta.close(saved.id)
       runs.closeConnection(saved.id)
-    }
+    } else if (input.forgetPassword) meta.close(saved.id) // the explorer asks next time; open sessions carry on
     return saved
   })
 
@@ -124,13 +138,23 @@ const activate: Activate = async (orca) => {
     return { ok: true as const }
   })
 
+  handle('connections.signInState', async ({ id }) => store.signInState(id))
+  handle('connections.signIn', async ({ id, user, password, remember }) => {
+    await store.signIn(id, user, password, remember === true)
+    return { ok: true as const }
+  })
+
+  handle('connections.renameFolder', async ({ from, to }) => ({ moved: await store.renameFolder(from, to) }))
+
   handle('connections.test', async (input: ConnectionInput): Promise<ConnectionTestResult> => {
     const started = Date.now()
     let connection: Connection | undefined
     try {
       const config = { ...normalize(input), id: input.id ?? '' }
       if (config.auth.kind === 'entra') clearTokenCache() // Test means "try it now", with a fresh token
-      connection = await open(config, config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS }, input.password)
+      const password = config.auth.kind === 'sql' ? await store.testPassword(input) : undefined
+      if (config.auth.kind === 'sql' && (!config.auth.user || !password)) return { ok: false, error: 'Enter a user and password to test.' }
+      connection = await open(config, config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS }, password ?? undefined)
       const [row] = await queryRows(connection, `SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(32)) AS version, SUSER_SNAME() AS login`)
       return { ok: true, ms: Date.now() - started, serverVersion: String(row?.version), login: String(row?.login) }
     } catch (err) {
@@ -141,15 +165,15 @@ const activate: Activate = async (orca) => {
   })
 
   handle('tree.children', async ({ key }): Promise<TreeNode[]> => {
-    if (key === '') {
-      return (await store.list()).map((c) => ({
-        key: encodeKey({ connection: c.id }),
-        label: c.name,
-        description: `${c.server}${c.port === 1433 ? '' : `:${c.port}`}${c.auth.kind === 'entra' ? ' · Entra ID' : ''}`,
-        kind: 'connection' as const,
-        hasChildren: true
-      }))
-    }
+    if (typeof key !== 'string') throw Object.assign(new Error('key must be text'), { code: 'invalid_params' })
+    // Keys below a connection start with its folder's segments; the levels under it are the same
+    // wherever it is listed.
+    const { prefix, rest } = splitGroup(key)
+    if (rest === '') return connectionTree(await store.list(), decodeKey(prefix).group ?? [])
+    return (await objectChildren(rest)).map((node) => ({ ...node, key: prefix + node.key }))
+  })
+
+  const objectChildren = async (key: string): Promise<TreeNode[]> => {
     let path: ReturnType<typeof decodeKey>
     try {
       path = decodeKey(key)
@@ -168,10 +192,12 @@ const activate: Activate = async (orca) => {
         return databaseNodes(connection, path)
       })
     } catch (err) {
+      // The page asks for a login (again, with why) and tries again.
+      if ((err as { code?: string }).code === 'credentials_required' || (err as { signInRefused?: boolean }).signInRefused) throw err
       // Show the failure inside the tree, under the node that failed.
       return [{ key: `${key}/error:`, label: err instanceof Error ? err.message : String(err), kind: 'error', hasChildren: false }]
     }
-  })
+  }
 
   handle('databases.list', async ({ connectionId }) => meta.use(connectionId, undefined, listDatabases))
 
@@ -204,6 +230,7 @@ const activate: Activate = async (orca) => {
   handle('query.run', async ({ consoleId, connectionId, database, sql, firstLine, uploadId }) => {
     const owner = ownerOf(consoleId)
     const config = await store.get(connectionId)
+    if (config.auth.kind === 'sql') await store.sqlLogin(config) // ask for a missing login before the run starts
     const target = { connectionId, database, open: () => open(config, database || config.database), label: `${config.name} · ${database || config.database || 'default database'}` }
     const script = typeof uploadId === 'string' ? runs.takeUpload(owner, uploadId) : sql
     return { runId: await runs.start(owner, target, script, firstLine) }

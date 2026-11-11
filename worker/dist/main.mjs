@@ -69245,6 +69245,7 @@ function clearTokenCache() {
 var PLACEHOLDER_TAGS = /* @__PURE__ */ new Set(["more", "error"]);
 function encodeKey(path3) {
   const parts = [];
+  for (const segment of path3.group ?? []) parts.push(`g:${encodeURIComponent(segment)}`);
   if (path3.connection) parts.push(`c:${encodeURIComponent(path3.connection)}`);
   if (path3.database !== void 0) parts.push(`d:${encodeURIComponent(path3.database)}`);
   if (path3.schema !== void 0) parts.push(`s:${encodeURIComponent(path3.schema)}`);
@@ -69259,7 +69260,8 @@ function decodeKey(key) {
     const colon = part.indexOf(":");
     const tag = part.slice(0, colon);
     const value = decodeURIComponent(part.slice(colon + 1));
-    if (tag === "c") path3.connection = value;
+    if (tag === "g") (path3.group ??= []).push(value);
+    else if (tag === "c") path3.connection = value;
     else if (tag === "d") path3.database = value;
     else if (tag === "s") path3.schema = value;
     else if (tag === "f") path3.folder = value;
@@ -69270,6 +69272,10 @@ function decodeKey(key) {
     }
   }
   return path3;
+}
+function splitGroup(key) {
+  const match = /^(?:g:[^/]*(?:\/|$))*/.exec(key)[0];
+  return { prefix: match, rest: key.slice(match.length) };
 }
 var bracket = (name) => `[${name.replace(/]/g, "]]")}]`;
 
@@ -69477,16 +69483,28 @@ function openConnection(endpoint, credentials, { requestTimeout = 0 } = {}) {
     }
   });
   return new Promise((resolve, reject) => {
+    const numbers = [];
+    let cannotOpen = "";
+    const onError = (info) => {
+      if (typeof info.number === "number") numbers.push(info.number);
+      if (info.number === 4060 && info.message) cannotOpen = info.message;
+    };
+    connection.on("errorMessage", onError);
     connection.once("connect", (err) => {
+      connection.removeListener("errorMessage", onError);
       if (err) {
         connection.close();
-        reject(new Error(describeConnectError(err)));
+        reject(Object.assign(new Error(cannotOpen || describeConnectError(err)), { code: err.code, serverErrors: numbers }));
       } else resolve(connection);
     });
     connection.on("error", () => void 0);
     connection.connect();
   });
 }
+var isLoginRefused = (err) => {
+  const { code, serverErrors = [] } = err ?? {};
+  return code === "ELOGIN" && serverErrors.includes(18456) && !serverErrors.includes(4060);
+};
 var isClosed = (connection) => connection.closed === true;
 function describeConnectError(err) {
   const cause = err.cause instanceof AggregateError ? err.cause.errors.map((e) => e.message).join("; ") : "";
@@ -69967,24 +69985,54 @@ function normalizeColor(value) {
   return `#${hex.toLowerCase()}`;
 }
 
+// src/shared/folders.ts
+function normalizeFolder(path3) {
+  return typeof path3 === "string" ? folderSegments(path3).join("/") : "";
+}
+function folderSegments(path3) {
+  return (path3 ?? "").split(/[\\/]/).map((s) => s.trim()).filter(Boolean);
+}
+function movedFolder(folder, from, to) {
+  if (!folder) return void 0;
+  if (folder === from) return to;
+  return folder.startsWith(`${from}/`) ? `${to}${folder.slice(from.length)}` : void 0;
+}
+var compareNames = (a, b) => a.localeCompare(b, void 0, { sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0);
+
 // worker/connections.ts
 var STORAGE_KEY = "connections";
 var passwordKey = (id) => `password:${id}`;
+var invalid = (message) => Object.assign(new Error(message), { code: "invalid_params" });
+var REFUSED_SHOWN_MS = 3e4;
+var connectsTheSame = (a, b) => a.server === b.server && a.port === b.port && a.database === b.database && a.encrypt === b.encrypt && a.trustServerCertificate === b.trustServerCertificate && JSON.stringify(a.auth) === JSON.stringify(b.auth);
+var credentialsRequired = (config) => Object.assign(new Error(`Sign in to ${config.name} to connect.`), { code: "credentials_required", connectionId: config.id });
 var ConnectionStore = class {
   orca;
   /** Saves and deletes read, change and write the whole list: one at a time, or two consoles
    *  saving at once would each write a list without the other's change. */
   writes = Promise.resolve();
+  /** Logins given at sign-in, by connection id; `remember`: to be saved once accepted. */
+  signedIn = /* @__PURE__ */ new Map();
+  /** Such a login the server refused: its user, why, and when. */
+  refused = /* @__PURE__ */ new Map();
+  /** Whether a password is saved, by connection id, so listing need not read every secret. */
+  hasPassword = /* @__PURE__ */ new Map();
   constructor(orca) {
     this.orca = orca;
   }
   async list() {
     const stored = await this.orca.storage.get(STORAGE_KEY);
-    return Array.isArray(stored) ? stored : [];
+    if (!Array.isArray(stored)) return [];
+    return stored.map((c) => {
+      if (c.folder === void 0) return c;
+      const { folder, ...rest } = c;
+      const normalized = normalizeFolder(folder);
+      return normalized ? { ...rest, folder: normalized } : rest;
+    });
   }
   async get(id) {
     const found = (await this.list()).find((c) => c.id === id);
-    if (!found) throw Object.assign(new Error(`Unknown connection ${id}`), { code: "invalid_params" });
+    if (!found) throw invalid(`Unknown connection ${id}`);
     return found;
   }
   /** Runs `change` after every write queued before it. */
@@ -69999,42 +70047,132 @@ var ConnectionStore = class {
   delete(id) {
     return this.serialized(() => this.deleteNow(id));
   }
+  /** The user and password to connect with; throws `credentials_required` without them. */
+  async sqlLogin(config) {
+    const given = this.signedIn.get(config.id);
+    if (given) return { user: given.user, password: given.password, remembered: false };
+    const user = config.auth.kind === "sql" ? config.auth.user : "";
+    const password = user ? await this.orca.secrets.get(passwordKey(config.id)) : null;
+    if (user) this.hasPassword.set(config.id, password !== null);
+    if (!user || password === null) throw credentialsRequired(config);
+    return { user, password, remembered: true };
+  }
+  async signInState(id) {
+    const config = await this.get(id);
+    const user = config.auth.kind === "sql" ? config.auth.user : "";
+    const given = this.signedIn.get(id);
+    const needed = config.auth.kind === "sql" && !given && (!user || !await this.passwordSaved(id));
+    const refused = needed ? this.refused.get(id) : void 0;
+    const failure = refused && Date.now() - refused.at < REFUSED_SHOWN_MS ? refused.message : void 0;
+    return {
+      needed,
+      name: config.name,
+      user: given?.user ?? (user || refused?.user || ""),
+      ...failure ? { failure } : {},
+      ...given?.remember ? { saving: true } : {}
+    };
+  }
+  /** Kept in memory; one to remember is saved by loginAccepted. */
+  signIn(id, user, password, remember) {
+    return this.serialized(async () => {
+      const config = await this.get(id);
+      if (config.auth.kind !== "sql") throw invalid("This connection does not sign in with a user and password");
+      const name = typeof user === "string" ? user.trim() : "";
+      if (!name) throw invalid("User is required");
+      if (typeof password !== "string" || !password) throw invalid("Password is required");
+      this.refused.delete(id);
+      this.signedIn.set(id, { user: name, password, remember });
+    });
+  }
+  /** The server accepted a login: one given at sign-in to remember is saved now, like an edit
+   *  (user in the config, password in the secrets). True when it was. */
+  loginAccepted(id, login) {
+    return this.serialized(async () => {
+      const given = this.signedIn.get(id);
+      if (login.remembered || !given?.remember || given.user !== login.user || given.password !== login.password) return false;
+      const config = await this.get(id);
+      await this.saveNow({ ...config, auth: { kind: "sql", user: given.user }, password: given.password });
+      return true;
+    });
+  }
+  /** The server refused a login: one given at sign-in is forgotten, so the next attempt asks again. */
+  loginRefused(id, login, message) {
+    if (login.remembered || this.signedIn.get(id)?.password !== login.password) return;
+    this.signedIn.delete(id);
+    this.refused.set(id, { user: login.user, message, at: Date.now() });
+  }
+  async passwordSaved(id) {
+    let saved = this.hasPassword.get(id);
+    if (saved === void 0) {
+      saved = await this.orca.secrets.get(passwordKey(id)) !== null;
+      this.hasPassword.set(id, saved);
+    }
+    return saved;
+  }
+  /** How many connections moved. */
+  renameFolder(from, to) {
+    return this.serialized(async () => {
+      const source = normalizeFolder(from);
+      const target = normalizeFolder(to);
+      if (!source) throw invalid("Which folder?");
+      if (!target) throw invalid("Folder name is required");
+      let moved = 0;
+      const next = (await this.list()).map((c) => {
+        const folder = movedFolder(c.folder, source, target);
+        if (folder === void 0) return c;
+        moved++;
+        return { ...c, folder };
+      });
+      if (moved > 0 && source !== target) await this.orca.storage.set(STORAGE_KEY, next);
+      return moved;
+    });
+  }
   async saveNow(input) {
     const config = normalize(input);
+    if (config.auth.kind === "sql" && input.password && !config.auth.user) throw invalid("Enter the user this password is for");
     const all = await this.list();
-    if (all.some((c) => c.name === config.name && c.id !== config.id)) {
-      throw Object.assign(new Error(`A connection named "${config.name}" already exists`), { code: "invalid_params" });
+    if (all.some((c) => c.name === config.name && c.id !== config.id)) throw invalid(`A connection named "${config.name}" already exists`);
+    const before = all.find((c) => c.id === config.id);
+    if (config.auth.kind === "sql" && input.password) {
+      await this.orca.secrets.set(passwordKey(config.id), input.password);
+      this.hasPassword.set(config.id, true);
+    } else if (config.auth.kind !== "sql" || input.forgetPassword) {
+      await this.orca.secrets.delete(passwordKey(config.id));
+      this.hasPassword.set(config.id, false);
     }
-    const next = all.some((c) => c.id === config.id) ? all.map((c) => c.id === config.id ? config : c) : [...all, config];
+    const next = before ? all.map((c) => c.id === config.id ? config : c) : [...all, config];
     await this.orca.storage.set(STORAGE_KEY, next);
-    if (config.auth.kind === "sql" && input.password) await this.orca.secrets.set(passwordKey(config.id), input.password);
-    if (config.auth.kind !== "sql") await this.orca.secrets.delete(passwordKey(config.id));
+    if (!before || input.password || !connectsTheSame(before, config)) {
+      this.signedIn.delete(config.id);
+      this.refused.delete(config.id);
+    }
     return config;
   }
   async deleteNow(id) {
     await this.orca.storage.set(STORAGE_KEY, (await this.list()).filter((c) => c.id !== id));
     await this.orca.secrets.delete(passwordKey(id));
+    this.hasPassword.delete(id);
+    this.signedIn.delete(id);
+    this.refused.delete(id);
   }
-  /** The password to use: the one typed (testing an unsaved form) or the stored one. */
-  async password(id, typed) {
-    if (typed) return typed;
-    const stored = id ? await this.orca.secrets.get(passwordKey(id)) : null;
-    if (stored === null) throw new Error("No password saved for this connection: edit it and enter one.");
-    return stored;
+  /** The password Test uses: the one typed, else the saved one (unless it is to be forgotten). */
+  async testPassword(input) {
+    if (input.password) return input.password;
+    return input.id && !input.forgetPassword ? this.orca.secrets.get(passwordKey(input.id)) : null;
   }
 };
 function normalize(input) {
   const name = input.name?.trim();
   const server = input.server?.trim();
-  if (!name) throw Object.assign(new Error("Name is required"), { code: "invalid_params" });
-  if (!server) throw Object.assign(new Error("Server is required"), { code: "invalid_params" });
+  if (!name) throw invalid("Name is required");
+  if (!server) throw invalid("Server is required");
   const port = Number(input.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw Object.assign(new Error("Port must be 1–65535"), { code: "invalid_params" });
+    throw invalid("Port must be 1–65535");
   }
   const color = normalizeColor(input.color);
+  const folder = normalizeFolder(input.folder);
   const auth = input.auth?.kind === "entra" ? { kind: "entra" } : { kind: "sql", user: input.auth?.kind === "sql" ? input.auth.user.trim() : "" };
-  if (auth.kind === "sql" && !auth.user) throw Object.assign(new Error("User is required for SQL login"), { code: "invalid_params" });
   return {
     id: input.id || randomUUID2(),
     name,
@@ -70044,8 +70182,27 @@ function normalize(input) {
     auth,
     encrypt: input.encrypt !== false,
     trustServerCertificate: input.trustServerCertificate === true,
-    ...color ? { color } : {}
+    ...color ? { color } : {},
+    ...folder ? { folder } : {}
   };
+}
+function connectionTree(connections, group = []) {
+  const inside = connections.map((c) => ({ c, segments: folderSegments(c.folder) })).filter(({ segments }) => segments.length >= group.length && group.every((g, i) => segments[i] === g));
+  const subfolders = new Set(inside.filter(({ segments }) => segments.length > group.length).map(({ segments }) => segments[group.length]));
+  const folders = [...subfolders].sort(compareNames).map((name) => ({
+    key: encodeKey({ group: [...group, name] }),
+    label: name,
+    kind: "group",
+    hasChildren: true
+  }));
+  const own = inside.filter(({ segments }) => segments.length === group.length).map(({ c }) => c).sort((a, b) => compareNames(a.name, b.name)).map((c) => ({
+    key: encodeKey({ group, connection: c.id }),
+    label: c.name,
+    description: `${c.server}${c.port === 1433 ? "" : `:${c.port}`}${c.auth.kind === "entra" ? " · Entra ID" : ""}`,
+    kind: "connection",
+    hasChildren: true
+  }));
+  return [...folders, ...own];
 }
 
 // worker/activity.ts
@@ -70362,7 +70519,7 @@ var END_REASONS = {
   worker: "SeaQull's worker stopped (Orca quit or restarted, the plugin was reloaded or updated, or the worker failed)"
 };
 var newSessionText = (reason) => `New SQL session: the previous one ended because ${END_REASONS[reason]}. Its temp tables and SET options are gone, and any transaction it had open was rolled back.`;
-var invalid = (message) => Object.assign(new Error(message), { code: "invalid_params" });
+var invalid2 = (message) => Object.assign(new Error(message), { code: "invalid_params" });
 var cancelled = () => Object.assign(new Error("Cancelled."), { cancelled: true });
 var jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value));
 function unlessAborted(promise, signal) {
@@ -70666,12 +70823,12 @@ var RunManager = class {
   }
   get(runId) {
     const run = this.runs.get(runId);
-    if (!run) throw invalid("That result is gone (the worker restarted or a newer query replaced it). Run the query again.");
+    if (!run) throw invalid2("That result is gone (the worker restarted or a newer query replaced it). Run the query again.");
     return run;
   }
   result(runId, result) {
     const data = Number.isInteger(result) ? this.get(runId).results[result] : void 0;
-    if (!data) throw invalid(`No result ${result}`);
+    if (!data) throw invalid2(`No result ${result}`);
     return data;
   }
   /** `messagesFrom`: the messages the caller already has (they only ever grow at the end): just
@@ -70700,7 +70857,7 @@ var RunManager = class {
   /** Rows from `offset`, as many as fit in one answer, with long values cut short (see ValueCut). */
   rows(runId, result, offset, limit) {
     const data = this.result(runId, result);
-    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1) throw invalid("offset and limit must be whole numbers ≥ 0 and ≥ 1");
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1) throw invalid2("offset and limit must be whole numbers ≥ 0 and ≥ 1");
     const rows = [];
     const cut = [];
     let bytes = 0;
@@ -70726,14 +70883,14 @@ var RunManager = class {
     try {
       info = formatInfo(format);
     } catch (err) {
-      throw invalid(err.message);
+      throw invalid2(err.message);
     }
     const data = this.result(runId, result);
     const range = selection ?? { r0: 0, r1: data.rows.length - 1, c0: 0, c1: data.summary.columns.length - 1 };
     if (selection !== void 0 && !withinResult(selection, data.rows.length, data.summary.columns.length)) {
-      throw invalid("selection must be rows r0…r1 and columns c0…c1 of the result");
+      throw invalid2("selection must be rows r0…r1 and columns c0…c1 of the result");
     }
-    if (raw && (!selection || range.r0 !== range.r1 || range.c0 !== range.c1)) throw invalid("raw needs a selection of one cell");
+    if (raw && (!selection || range.r0 !== range.r1 || range.c0 !== range.c1)) throw invalid2("raw needs a selection of one cell");
     for (const [id, prepared] of this.exports) if (prepared.runId === runId) this.dropExport(id);
     const rows = data.rows.slice(range.r0, range.r1 + 1);
     const bytes = (rows.length + 2) * 8 + rows.length * 8;
@@ -70754,7 +70911,7 @@ var RunManager = class {
     }
     ends[rows.length + 1] = end + parts.tail.length;
     const length = ends[rows.length + 1];
-    if (!this.runs.has(runId)) throw invalid("That result is gone (a newer query replaced it). Run the query again.");
+    if (!this.runs.has(runId)) throw invalid2("That result is gone (a newer query replaced it). Run the query again.");
     for (const [id, prepared] of this.exports) if (prepared.runId === runId) this.dropExport(id);
     const exportId = randomUUID3();
     this.exports.set(exportId, { runId, parts, rows, ends, createdAt: Date.now(), bytes });
@@ -70768,7 +70925,7 @@ var RunManager = class {
   exportChunk(exportId, offset) {
     const prepared = this.exports.get(exportId);
     const length = prepared?.ends[prepared.ends.length - 1] ?? 0;
-    if (!prepared || !Number.isInteger(offset) || offset < 0 || offset > length) throw invalid("Export expired: export again.");
+    if (!prepared || !Number.isInteger(offset) || offset < 0 || offset > length) throw invalid2("Export expired: export again.");
     const { ends, parts, rows } = prepared;
     let lo = 0;
     let hi = ends.length - 1;
@@ -70815,10 +70972,10 @@ var RunManager = class {
    * console's unfinished one. Counted in the worker's memory budget; dropped after 5 idle minutes.
    */
   append(owner, uploadId, offset, part) {
-    if (typeof part !== "string" || !Number.isInteger(offset) || offset < 0) throw invalid("part must be text and offset a whole number ≥ 0");
+    if (typeof part !== "string" || !Number.isInteger(offset) || offset < 0) throw invalid2("part must be text and offset a whole number ≥ 0");
     let id = uploadId;
     let upload = id ? this.uploads.get(id) : void 0;
-    if (id && (!upload || upload.owner !== owner)) throw invalid("That script upload expired: run again.");
+    if (id && (!upload || upload.owner !== owner)) throw invalid2("That script upload expired: run again.");
     if (!upload) {
       for (const [other, existing] of this.uploads) if (existing.owner === owner) this.dropUpload(other);
       id = randomUUID3();
@@ -70827,12 +70984,12 @@ var RunManager = class {
     }
     if (offset !== upload.length) {
       this.dropUpload(id);
-      throw invalid(`Script upload out of order (part at ${offset}, expected ${upload.length}): run again.`);
+      throw invalid2(`Script upload out of order (part at ${offset}, expected ${upload.length}): run again.`);
     }
     const utf8 = Buffer.byteLength(part);
     if (upload.utf8 + utf8 > MAX_SCRIPT_BYTES) {
       this.dropUpload(id);
-      throw invalid(`Script too large: SeaQull runs at most ${MAX_SCRIPT_BYTES / 1024 / 1024} MB at once. Run it in parts (select one, then ⌘↵).`);
+      throw invalid2(`Script too large: SeaQull runs at most ${MAX_SCRIPT_BYTES / 1024 / 1024} MB at once. Run it in parts (select one, then ⌘↵).`);
     }
     if (this.keptBytes + part.length * 2 > WORKER_BYTE_BUDGET) {
       this.dropUpload(id);
@@ -70848,7 +71005,7 @@ var RunManager = class {
   /** The whole uploaded script, which is then forgotten. */
   takeUpload(owner, uploadId) {
     const upload = this.uploads.get(uploadId);
-    if (!upload || upload.owner !== owner) throw invalid("That script upload expired: run again.");
+    if (!upload || upload.owner !== owner) throw invalid2("That script upload expired: run again.");
     this.dropUpload(uploadId);
     return upload.parts.join("");
   }
@@ -71031,19 +71188,29 @@ var activate = async (orca) => {
     sessionMemory,
     () => indicator.set(runs.activity())
   );
-  const credentialsFor = async (config, typedPassword) => {
-    if (config.auth.kind === "entra") {
-      const azPath = await orca.settings.get("azPath");
-      return { kind: "entra", token: await getSqlAccessToken(typeof azPath === "string" ? azPath : void 0) };
-    }
-    return { kind: "sql", user: config.auth.user, password: await store.password(config.id, typedPassword) };
+  const entraCredentials = async () => {
+    const azPath = await orca.settings.get("azPath");
+    return { kind: "entra", token: await getSqlAccessToken(typeof azPath === "string" ? azPath : void 0) };
   };
-  const open2 = async (config, database, options, typedPassword) => {
-    const credentials = await credentialsFor(config, typedPassword);
+  const open2 = async (config, database, options, password) => {
+    if (config.auth.kind === "entra") {
+      try {
+        return await openConnection(endpointOf(config, database), await entraCredentials(), options);
+      } catch (err) {
+        clearTokenCache();
+        throw err;
+      }
+    }
+    const login = password !== void 0 ? { user: config.auth.user, password, remembered: true } : await store.sqlLogin(config);
     try {
-      return await openConnection(endpointOf(config, database), credentials, options);
+      const connection = await openConnection(endpointOf(config, database), { kind: "sql", user: login.user, password: login.password }, options);
+      if (!login.remembered) await store.loginAccepted(config.id, login).catch((err) => orca.log(`SeaQull: could not save the login: ${err instanceof Error ? err.message : err}`));
+      return connection;
     } catch (err) {
-      if (config.auth.kind === "entra") clearTokenCache();
+      if (isLoginRefused(err) && !login.remembered) {
+        store.loginRefused(config.id, login, err instanceof Error ? err.message : String(err));
+        throw Object.assign(err, { signInRefused: true });
+      }
       throw err;
     }
   };
@@ -71051,15 +71218,18 @@ var activate = async (orca) => {
     const config = await store.get(connectionId);
     return open2(config, database ?? config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS });
   });
-  handle("connections.list", async () => store.list());
+  handle(
+    "connections.list",
+    async () => Promise.all((await store.list()).map(async (c) => c.auth.kind === "sql" && await store.passwordSaved(c.id) ? { ...c, passwordSaved: true } : c))
+  );
   handle("connections.save", async (input) => {
     const before = input.id ? (await store.list()).find((c) => c.id === input.id) : void 0;
     const saved = await store.save(input);
-    const reconnect = !before || !!input.password || JSON.stringify(endpointOf(before)) !== JSON.stringify(endpointOf(saved)) || JSON.stringify(before.auth) !== JSON.stringify(saved.auth);
+    const reconnect = !before || !!input.password || !connectsTheSame(before, saved);
     if (reconnect) {
       meta.close(saved.id);
       runs.closeConnection(saved.id);
-    }
+    } else if (input.forgetPassword) meta.close(saved.id);
     return saved;
   });
   handle("connections.delete", async ({ id }) => {
@@ -71068,13 +71238,21 @@ var activate = async (orca) => {
     runs.closeConnection(id);
     return { ok: true };
   });
+  handle("connections.signInState", async ({ id }) => store.signInState(id));
+  handle("connections.signIn", async ({ id, user, password, remember }) => {
+    await store.signIn(id, user, password, remember === true);
+    return { ok: true };
+  });
+  handle("connections.renameFolder", async ({ from, to }) => ({ moved: await store.renameFolder(from, to) }));
   handle("connections.test", async (input) => {
     const started = Date.now();
     let connection;
     try {
       const config = { ...normalize(input), id: input.id ?? "" };
       if (config.auth.kind === "entra") clearTokenCache();
-      connection = await open2(config, config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS }, input.password);
+      const password = config.auth.kind === "sql" ? await store.testPassword(input) : void 0;
+      if (config.auth.kind === "sql" && (!config.auth.user || !password)) return { ok: false, error: "Enter a user and password to test." };
+      connection = await open2(config, config.database, { requestTimeout: META_REQUEST_TIMEOUT_MS }, password ?? void 0);
       const [row] = await queryRows(connection, `SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(32)) AS version, SUSER_SNAME() AS login`);
       return { ok: true, ms: Date.now() - started, serverVersion: String(row?.version), login: String(row?.login) };
     } catch (err) {
@@ -71084,15 +71262,12 @@ var activate = async (orca) => {
     }
   });
   handle("tree.children", async ({ key }) => {
-    if (key === "") {
-      return (await store.list()).map((c) => ({
-        key: encodeKey({ connection: c.id }),
-        label: c.name,
-        description: `${c.server}${c.port === 1433 ? "" : `:${c.port}`}${c.auth.kind === "entra" ? " · Entra ID" : ""}`,
-        kind: "connection",
-        hasChildren: true
-      }));
-    }
+    if (typeof key !== "string") throw Object.assign(new Error("key must be text"), { code: "invalid_params" });
+    const { prefix, rest } = splitGroup(key);
+    if (rest === "") return connectionTree(await store.list(), decodeKey(prefix).group ?? []);
+    return (await objectChildren(rest)).map((node) => ({ ...node, key: prefix + node.key }));
+  });
+  const objectChildren = async (key) => {
     let path3;
     try {
       path3 = decodeKey(key);
@@ -71109,9 +71284,10 @@ var activate = async (orca) => {
         return databaseNodes(connection, path3);
       });
     } catch (err) {
+      if (err.code === "credentials_required" || err.signInRefused) throw err;
       return [{ key: `${key}/error:`, label: err instanceof Error ? err.message : String(err), kind: "error", hasChildren: false }];
     }
-  });
+  };
   handle("databases.list", async ({ connectionId }) => meta.use(connectionId, void 0, listDatabases));
   const validateTarget = (connectionId, database) => {
     if (typeof connectionId !== "string" || !connectionId) throw Object.assign(new Error("connectionId is required"), { code: "invalid_params" });
@@ -71137,6 +71313,7 @@ var activate = async (orca) => {
   handle("query.run", async ({ consoleId, connectionId, database, sql, firstLine, uploadId }) => {
     const owner = ownerOf(consoleId);
     const config = await store.get(connectionId);
+    if (config.auth.kind === "sql") await store.sqlLogin(config);
     const target = { connectionId, database, open: () => open2(config, database || config.database), label: `${config.name} · ${database || config.database || "default database"}` };
     const script = typeof uploadId === "string" ? runs.takeUpload(owner, uploadId) : sql;
     return { runId: await runs.start(owner, target, script, firstLine) };

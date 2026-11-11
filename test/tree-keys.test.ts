@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { decodeKey, encodeKey, isTableLike, selectTopSql, sqlName, type TreePath } from '../src/shared/tree-keys.ts'
+import { decodeKey, encodeKey, isTableLike, selectTopSql, splitGroup, sqlName, type TreePath } from '../src/shared/tree-keys.ts'
 
 const table: TreePath = { connection: 'c1', database: 'Sales DB', schema: 'dbo', folder: 'tables', object: 'Order/Lines]', objectKind: 't' }
 
@@ -8,6 +8,21 @@ test('keys round-trip, special characters included', () => {
   for (const path of [{ connection: 'c1' }, { connection: 'c1', database: '' }, table, { ...table, column: 'Qty ]x' }]) {
     assert.deepEqual(decodeKey(encodeKey(path)), path)
   }
+})
+
+test('folder segments round-trip, odd characters in folder and connection names included', () => {
+  const group = ['Clients', 'A/B: c%d', ' ünïcode ']
+  for (const path of [{ group }, { group, connection: 'id/1:x' }, { ...table, group, column: 'c' }]) {
+    const key = encodeKey(path)
+    assert.equal(key.split('/').length, (path.group?.length ?? 0) + encodeKey({ ...path, group: undefined }).split('/').filter(Boolean).length)
+    assert.deepEqual(decodeKey(key), path)
+  }
+  const key = encodeKey({ ...table, group })
+  const { prefix, rest } = splitGroup(key)
+  assert.equal(prefix, `${encodeKey({ group })}/`)
+  assert.equal(rest, encodeKey(table))
+  assert.deepEqual(splitGroup(encodeKey(table)), { prefix: '', rest: encodeKey(table) })
+  assert.deepEqual(splitGroup(encodeKey({ group })), { prefix: encodeKey({ group }), rest: '' })
 })
 
 test('a column key keeps its object', () => {

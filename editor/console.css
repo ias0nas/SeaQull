@@ -227,6 +227,23 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .menu button:hover, .menu button:focus { background: var(--orca-accent); color: var(--orca-accent-foreground, inherit); outline: none; }
 .menu button.danger { color: var(--orca-destructive); }
 .menu-separator { height: 1px; margin: 4px 2px; background: var(--border); }
+/* Set apart from the dialog it opens in (both are popover surfaces): a little lighter in dark
+   themes, darker in light ones, with a firmer border and a shadow. */
+.combo-list {
+  position: fixed; z-index: 10; box-sizing: border-box; padding: 4px; max-height: calc(8 * 26px + 10px); overflow-y: auto; font-size: 12.5px;
+  --combo-bg: color-mix(in srgb, var(--orca-popover, Canvas) 94%, white);
+  background: var(--combo-bg); color: var(--orca-popover-foreground, inherit);
+  border: 1px solid color-mix(in srgb, var(--orca-foreground, CanvasText) 22%, transparent);
+  border-radius: var(--orca-radius, 6px); box-shadow: 0 10px 28px #0009, 0 2px 6px #0006;
+}
+:root.light .combo-list { --combo-bg: color-mix(in srgb, var(--orca-popover, Canvas) 97%, black); box-shadow: 0 10px 28px #0002, 0 2px 6px #0001; }
+.combo-list[hidden] { display: none; }
+.combo-option { display: flex; align-items: center; gap: 6px; padding: 4px 10px; min-height: 26px; box-sizing: border-box; line-height: 18px; border-radius: 4px; cursor: default; }
+.combo-option:hover, .combo-option.active { background: color-mix(in srgb, var(--orca-foreground, CanvasText) 12%, var(--orca-accent, transparent)); color: var(--orca-accent-foreground, inherit); }
+.combo-icon { flex: 0 0 14px; display: inline-flex; color: var(--muted); }
+.combo-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.combo-check { flex: 0 0 14px; display: inline-flex; color: var(--orca-primary, var(--sel)); }
+.combo-option mark { background: none; color: inherit; font-weight: 600; }
 
 dialog {
   padding: 16px; border: 1px solid var(--border); border-radius: calc(var(--orca-radius, 6px) + 2px);
@@ -261,7 +278,8 @@ dialog h2 { margin: 0 0 4px; font-size: 15px; }
 .dialog-buttons { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .dialog-buttons .spacer { flex: 1; }
 #confirm-dialog p { margin: 0 0 8px; }
-#ready-dialog { width: min(380px, calc(100vw - 32px)); }
+#ready-dialog, #prompt-dialog, #signin-dialog { width: min(380px, calc(100vw - 32px)); }
+#prompt-note:empty { display: none; }
 #ready-dialog p { margin: 0 0 8px; }
 .ready-heading { display: flex; align-items: center; gap: 6px; }
 .info { display: inline-flex; color: var(--muted); cursor: help; border-radius: 50%; }

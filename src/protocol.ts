@@ -5,7 +5,8 @@
 // large scripts are sent in parts (query.append).
 
 export type AuthConfig =
-  /** SQL Server login; the password lives in Orca's encrypted secrets (OS keychain). */
+  /** SQL Server login; the password lives in Orca's encrypted secrets (OS keychain). Without a
+   *  user or a saved password, connecting asks for them (connections.signIn). */
   | { kind: 'sql'; user: string }
   /** Microsoft Entra ID token from the Azure CLI (`az login`); no stored secret. */
   | { kind: 'entra' }
@@ -22,16 +23,28 @@ export type ConnectionConfig = {
   trustServerCertificate: boolean
   /** `#rrggbb`, shown on its tabs and in the explorer (production in red, say). */
   color?: string
+  /** The explorer folder it is listed in, as `Clients/Acme`; absent for none. */
+  folder?: string
 }
 
-/** Create/update/test payload. `password` (SQL auth) blank means "keep the stored one". */
-export type ConnectionInput = Omit<ConnectionConfig, 'id'> & { id?: string; password?: string }
+/** Create/update/test payload. `password` (SQL auth) blank means "keep the stored one";
+ *  `forgetPassword` deletes it. */
+export type ConnectionInput = Omit<ConnectionConfig, 'id'> & { id?: string; password?: string; forgetPassword?: boolean }
+
+/** As connections.list lists it: `passwordSaved` when a SQL login's password is in the secrets. */
+export type SavedConnection = ConnectionConfig & { passwordSaved?: boolean }
+
+/** Whether connecting needs a user and password first. `failure`: why the last ones given were
+ *  refused (for a short while). `saving`: ones given to remember are saved once they work. */
+export type SignInState = { needed: boolean; name: string; user: string; failure?: string; saving?: boolean }
 
 export type ConnectionTestResult =
   | { ok: true; ms: number; serverVersion: string; login: string }
   | { ok: false; error: string }
 
 export type TreeNodeKind =
+  /** A folder of connections ('folder' is Tables, Views and the like). */
+  | 'group'
   | 'connection'
   | 'database'
   | 'schema'
@@ -150,11 +163,21 @@ export type ObjectColumns = ObjectName & {
 declare module 'orca' {
   // Declaration merging needs an interface.
   interface PluginRequests {
-    'connections.list': { input: Record<string, never>; output: ConnectionConfig[] }
+    'connections.list': { input: Record<string, never>; output: SavedConnection[] }
     'connections.save': { input: ConnectionInput; output: ConnectionConfig }
     'connections.delete': { input: { id: string }; output: { ok: true } }
     'connections.test': { input: ConnectionInput; output: ConnectionTestResult }
-    /** Children of a tree node; `key: ''` lists the connections. */
+    /** Requests that connect fail when a SQL login has no user or password to use: the page asks
+     *  this, then for them (connections.signIn), and tries again. */
+    'connections.signInState': { input: { id: string }; output: SignInState }
+    /** Kept in the worker's memory until it stops, the connection is deleted, or its server,
+     *  database or login settings change (not its name, colour or folder). `remember`: saved with
+     *  the connection once the server accepts them. */
+    'connections.signIn': { input: { id: string; user: string; password: string; remember: boolean }; output: { ok: true } }
+    /** Moves every connection in the folder `from` (and its subfolders) to `to`, merging into a
+     *  folder of that name if there is one. */
+    'connections.renameFolder': { input: { from: string; to: string }; output: { moved: number } }
+    /** Children of a tree node; `key: ''` lists the top-level folders and connections. */
     'tree.children': { input: { key: string }; output: TreeNode[] }
     /** Databases the connection's login can open, for the editor's picker. */
     'databases.list': { input: { connectionId: string }; output: string[] }

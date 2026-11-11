@@ -6,7 +6,7 @@ import { after, before, test } from 'node:test'
 import type { Connection } from 'tedious'
 import { completionColumns } from '../worker/completion.ts'
 import { columnNodes, databaseNodes, decodeKey, encodeKey, folderNodes, listDatabases, objectNodes, schemaNodes } from '../worker/metadata.ts'
-import { MAX_CELL_CHARS, openConnection, queryRows, type Credentials, type Endpoint } from '../worker/mssql.ts'
+import { isLoginRefused, MAX_CELL_CHARS, openConnection, queryRows, type Credentials, type Endpoint } from '../worker/mssql.ts'
 import { exportResult } from '../src/shared/export.ts'
 import { MAX_ROW_BYTES, newSessionText, probeTransaction, RunManager, type SessionMemory, type Target } from '../worker/runs.ts'
 
@@ -37,6 +37,25 @@ async function runToEnd(owner: string, sql: string, firstLine = 1) {
     await new Promise((r) => setTimeout(r, 20))
   }
 }
+
+test('a refused login and a database that cannot be opened both fail as ELOGIN, told apart by the server error numbers', async () => {
+  const refusal = async (e: Endpoint, c: Credentials) => {
+    try {
+      ;(await openConnection(e, c)).close()
+    } catch (err) {
+      return err as Error & { code?: string; serverErrors?: number[] }
+    }
+    throw new Error('connected')
+  }
+  const wrong = await refusal(endpoint, { ...credentials, password: 'wrong' })
+  assert.equal(wrong.code, 'ELOGIN')
+  assert.deepEqual(wrong.serverErrors, [18456])
+  assert.equal(isLoginRefused(wrong), true)
+  const noDatabase = await refusal({ ...endpoint, database: 'NoSuchDatabase' }, credentials)
+  assert.equal(noDatabase.code, 'ELOGIN')
+  assert.ok(noDatabase.serverErrors?.includes(4060), JSON.stringify(noDatabase.serverErrors))
+  assert.equal(isLoginRefused(noDatabase), false)
+})
 
 test('a server given as an IP address connects over TLS (no SNI; Node 25 refuses an IP there)', async () => {
   const byIp = await openConnection({ ...endpoint, server: '127.0.0.1' }, credentials)

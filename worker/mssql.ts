@@ -53,16 +53,32 @@ export function openConnection(endpoint: Endpoint, credentials: Credentials, { r
     }
   })
   return new Promise((resolve, reject) => {
+    // The server's error numbers tell a refused login (18456) from one whose database cannot be
+    // opened (4060, then 18456): tedious reports both as ELOGIN.
+    const numbers: number[] = []
+    let cannotOpen = ''
+    const onError = (info: { number?: number; message?: string }) => {
+      if (typeof info.number === 'number') numbers.push(info.number)
+      if (info.number === 4060 && info.message) cannotOpen = info.message
+    }
+    connection.on('errorMessage', onError)
     connection.once('connect', (err) => {
+      connection.removeListener('errorMessage', onError)
       if (err) {
         connection.close()
-        reject(new Error(describeConnectError(err)))
+        reject(Object.assign(new Error(cannotOpen || describeConnectError(err)), { code: (err as { code?: string }).code, serverErrors: numbers }))
       } else resolve(connection)
     })
     // Socket errors after connect would otherwise crash the worker.
     connection.on('error', () => undefined)
     connection.connect()
   })
+}
+
+/** The server refused the login itself (a wrong user or password), not the database it named. */
+export const isLoginRefused = (err: unknown): boolean => {
+  const { code, serverErrors = [] } = (err ?? {}) as { code?: string; serverErrors?: number[] }
+  return code === 'ELOGIN' && serverErrors.includes(18456) && !serverErrors.includes(4060)
 }
 
 /** The connection has ended (closed by us, the server or the network): nothing more can run on it.

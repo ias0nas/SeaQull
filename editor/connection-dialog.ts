@@ -1,8 +1,11 @@
-// Add/edit a saved connection, and confirm deleting one, in page-drawn <dialog>s (plugin frames
-// get no alert/confirm). Saving goes to the worker: the config to plugin storage, a SQL login
-// password to Orca's encrypted secrets.
-import type { ConnectionConfig, ConnectionInput } from '../src/protocol.ts'
+// Add/edit a saved connection, confirm deleting one, ask for a folder's new name, and sign in to a
+// connection without a saved login, in page-drawn <dialog>s (plugin frames get no alert, confirm
+// or prompt). Saving goes to the worker: the config to plugin storage, a SQL login password to
+// Orca's encrypted secrets.
+import type { ConnectionConfig, ConnectionInput, SavedConnection, SignInState } from '../src/protocol.ts'
 import { normalizeColor, PALETTE } from '../src/shared/colors.ts'
+import { normalizeFolder } from '../src/shared/folders.ts'
+import { Combobox } from './combobox.ts'
 import { request } from './request.ts'
 import { errorText } from './util.ts'
 
@@ -11,6 +14,7 @@ const ui = {
   dialog: $<HTMLDialogElement>('connection-dialog'),
   title: $<HTMLHeadingElement>('cd-title'),
   name: $<HTMLInputElement>('cd-name'),
+  folder: $<HTMLInputElement>('cd-folder'),
   swatches: $<HTMLDivElement>('cd-swatches'),
   color: $<HTMLInputElement>('cd-color'),
   server: $<HTMLInputElement>('cd-server'),
@@ -21,6 +25,8 @@ const ui = {
   entraNote: $<HTMLParagraphElement>('cd-entra-note'),
   user: $<HTMLInputElement>('cd-user'),
   password: $<HTMLInputElement>('cd-password'),
+  forgetRow: $<HTMLLabelElement>('cd-forget-row'),
+  forget: $<HTMLInputElement>('cd-forget'),
   encrypt: $<HTMLInputElement>('cd-encrypt'),
   trust: $<HTMLInputElement>('cd-trust'),
   status: $<HTMLParagraphElement>('cd-status'),
@@ -30,11 +36,29 @@ const ui = {
   confirm: $<HTMLDialogElement>('confirm-dialog'),
   confirmText: $<HTMLParagraphElement>('confirm-text'),
   confirmOk: $<HTMLButtonElement>('confirm-ok'),
-  confirmCancel: $<HTMLButtonElement>('confirm-cancel')
+  confirmCancel: $<HTMLButtonElement>('confirm-cancel'),
+  prompt: $<HTMLDialogElement>('prompt-dialog'),
+  promptTitle: $<HTMLHeadingElement>('prompt-title'),
+  promptLabel: $<HTMLSpanElement>('prompt-label'),
+  promptInput: $<HTMLInputElement>('prompt-input'),
+  promptNote: $<HTMLParagraphElement>('prompt-note'),
+  promptOk: $<HTMLButtonElement>('prompt-ok'),
+  promptCancel: $<HTMLButtonElement>('prompt-cancel'),
+  signIn: $<HTMLDialogElement>('signin-dialog'),
+  signInTitle: $<HTMLHeadingElement>('si-title'),
+  signInStatus: $<HTMLParagraphElement>('si-status'),
+  signInUser: $<HTMLInputElement>('si-user'),
+  signInPassword: $<HTMLInputElement>('si-password'),
+  signInRemember: $<HTMLInputElement>('si-remember'),
+  signInCancel: $<HTMLButtonElement>('si-cancel')
 }
 
 
+const folderBox = new Combobox(ui.folder)
+const promptBox = new Combobox(ui.promptInput)
+
 let editingId: string | undefined
+let passwordSaved = false
 let onSaved: ((saved: ConnectionConfig) => void | Promise<void>) | undefined
 let busy = false
 /** Bumped on every open: a Test still running for the previous dialog must not report into this one. */
@@ -50,6 +74,7 @@ function syncAuth(): void {
   const entra = ui.auth.value === 'entra'
   ui.sqlFields.hidden = entra
   ui.entraNote.hidden = !entra
+  ui.forgetRow.hidden = entra || !passwordSaved
   if (entra) ui.encrypt.checked = true
 }
 
@@ -93,26 +118,35 @@ ui.color.addEventListener('input', syncSwatches)
 function toInput(): ConnectionInput {
   const sql = ui.auth.value !== 'entra'
   const color = normalizeColor(ui.color.value)
+  const folder = normalizeFolder(ui.folder.value)
   return {
     ...(color ? { color } : {}),
+    ...(folder ? { folder } : {}),
     ...(editingId ? { id: editingId } : {}),
     name: ui.name.value,
     server: ui.server.value,
     port: Number(ui.port.value),
     database: ui.database.value,
     auth: sql ? { kind: 'sql', user: ui.user.value } : { kind: 'entra' },
-    ...(sql && ui.password.value ? { password: ui.password.value } : {}),
+    ...(sql && ui.forget.checked ? { forgetPassword: true } : sql && ui.password.value ? { password: ui.password.value } : {}),
     encrypt: ui.encrypt.checked,
     trustServerCertificate: ui.trust.checked
   }
 }
 
-export function openConnectionDialog(existing: ConnectionConfig | undefined, saved: (config: ConnectionConfig) => void | Promise<void>): void {
+/** `folder`: a new connection's folder; `folders`: those in use, suggested. */
+export function openConnectionDialog(
+  existing: SavedConnection | undefined,
+  saved: (config: ConnectionConfig) => void | Promise<void>,
+  { folder, folders = [] }: { folder?: string; folders?: string[] } = {}
+): void {
   session++
   editingId = existing?.id
   onSaved = saved
   ui.title.textContent = existing ? `Edit ${existing.name}` : 'New connection'
   ui.name.value = existing?.name ?? ''
+  ui.folder.value = existing ? (existing.folder ?? '') : (folder ?? '')
+  folderBox.setOptions(folders)
   setColor(existing?.color ?? '')
   ui.server.value = existing?.server ?? ''
   ui.port.value = String(existing?.port ?? 1433)
@@ -120,7 +154,11 @@ export function openConnectionDialog(existing: ConnectionConfig | undefined, sav
   ui.auth.value = existing?.auth.kind ?? 'sql'
   ui.user.value = existing?.auth.kind === 'sql' ? existing.auth.user : ''
   ui.password.value = ''
-  ui.password.placeholder = existing ? 'unchanged' : ''
+  passwordSaved = existing?.passwordSaved === true
+  ui.user.placeholder = 'asked when connecting'
+  ui.password.placeholder = passwordSaved ? 'unchanged' : 'asked when connecting'
+  ui.forget.checked = false
+  ui.password.disabled = false
   ui.encrypt.checked = existing?.encrypt ?? true
   ui.trust.checked = existing?.trustServerCertificate ?? false
   syncAuth()
@@ -131,6 +169,10 @@ export function openConnectionDialog(existing: ConnectionConfig | undefined, sav
 }
 
 ui.auth.addEventListener('change', syncAuth)
+ui.forget.addEventListener('change', () => {
+  ui.password.disabled = ui.forget.checked
+  if (ui.forget.checked) ui.password.value = ''
+})
 // Esc closes a <dialog> by itself: not while saving, or a failure would never be seen.
 ui.dialog.addEventListener('cancel', (event) => {
   if (busy) event.preventDefault()
@@ -145,8 +187,16 @@ function colorIsValid(): boolean {
   return false
 }
 
+/** A password is only kept with the user it is for. */
+function loginIsValid(): boolean {
+  if (ui.auth.value === 'entra' || !ui.password.value || ui.user.value.trim()) return true
+  setStatus('Enter the user this password is for.', 'danger')
+  ui.user.focus()
+  return false
+}
+
 ui.test.addEventListener('click', async () => {
-  if (busy || !colorIsValid()) return
+  if (busy || !colorIsValid() || !loginIsValid()) return
   const mine = session
   setBusy(true)
   setStatus('Connecting…')
@@ -164,7 +214,7 @@ ui.test.addEventListener('click', async () => {
 
 ui.dialog.addEventListener('submit', async (event) => {
   event.preventDefault()
-  if (busy || !colorIsValid()) return
+  if (busy || !colorIsValid() || !loginIsValid()) return
   const mine = session
   const callback = onSaved
   setBusy(true)
@@ -184,6 +234,60 @@ ui.dialog.addEventListener('submit', async (event) => {
     console.error('SeaQull: after saving the connection:', err) // reaches Orca's plugin log
   }
 })
+
+/** Asks for a line of text (suggesting `suggestions`); resolves null when cancelled. */
+export function promptDialog(title: string, label: string, value: string, okLabel: string, { suggestions = [], note = '' }: { suggestions?: string[]; note?: string } = {}): Promise<string | null> {
+  ui.promptTitle.textContent = title
+  ui.promptLabel.textContent = label
+  ui.promptInput.value = value
+  ui.promptNote.textContent = note
+  ui.promptOk.textContent = okLabel
+  promptBox.setOptions(suggestions)
+  ui.prompt.showModal()
+  ui.promptInput.select()
+  return new Promise((resolve) => {
+    const form = ui.prompt.querySelector('form')!
+    const finish = (result: string | null) => {
+      form.onsubmit = ui.promptCancel.onclick = ui.prompt.onclose = null
+      if (ui.prompt.open) ui.prompt.close()
+      resolve(result)
+    }
+    form.onsubmit = (event) => {
+      event.preventDefault()
+      finish(ui.promptInput.value)
+    }
+    ui.promptCancel.onclick = () => finish(null)
+    ui.prompt.onclose = () => finish(null)
+  })
+}
+
+/** Asks for a connection's user and password; null when cancelled. `failure`: why the last ones
+ *  were refused. The password is not kept here once handed over. */
+export function signInDialog(state: SignInState, remember = false): Promise<{ user: string; password: string; remember: boolean } | null> {
+  ui.signInTitle.textContent = `Sign in to ${state.name}`
+  ui.signInStatus.textContent = state.failure ?? ''
+  ui.signInStatus.hidden = !state.failure
+  ui.signInUser.value = state.user
+  ui.signInPassword.value = ''
+  ui.signInRemember.checked = remember
+  if (!ui.signIn.open) ui.signIn.showModal()
+  ;(state.user ? ui.signInPassword : ui.signInUser).focus()
+  return new Promise((resolve) => {
+    const form = ui.signIn.querySelector('form')!
+    const finish = (result: { user: string; password: string; remember: boolean } | null) => {
+      form.onsubmit = ui.signInCancel.onclick = ui.signIn.onclose = null
+      ui.signInPassword.value = ''
+      if (ui.signIn.open) ui.signIn.close()
+      resolve(result)
+    }
+    form.onsubmit = (event) => {
+      event.preventDefault()
+      finish({ user: ui.signInUser.value.trim(), password: ui.signInPassword.value, remember: ui.signInRemember.checked })
+    }
+    ui.signInCancel.onclick = () => finish(null)
+    ui.signIn.onclose = () => finish(null)
+  })
+}
 
 /** Resolves true when the person confirms. */
 export function confirmDialog(text: string, okLabel: string): Promise<boolean> {

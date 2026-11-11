@@ -1,10 +1,13 @@
 // Object-tree keys, shared by the worker (which builds them) and the console (which reads them to
 // insert names and build queries). A key is the node's path as `/`-joined, URI-encoded segments:
-// `c:<connId>/d:<db>/s:<schema>/f:tables/t:<name>/col:<column>`.
+// `g:<folder>/…/c:<connId>/d:<db>/s:<schema>/f:tables/t:<name>/col:<column>`, a `g:` segment for
+// each level of the connection's folder.
 
 export type Folder = 'tables' | 'views' | 'procedures' | 'functions'
 
 export type TreePath = {
+  /** The connection's folder, by level. */
+  group?: string[]
   connection?: string
   database?: string
   schema?: string
@@ -20,6 +23,7 @@ const PLACEHOLDER_TAGS = new Set(['more', 'error'])
 
 export function encodeKey(path: TreePath): string {
   const parts: string[] = []
+  for (const segment of path.group ?? []) parts.push(`g:${encodeURIComponent(segment)}`)
   if (path.connection) parts.push(`c:${encodeURIComponent(path.connection)}`)
   if (path.database !== undefined) parts.push(`d:${encodeURIComponent(path.database)}`)
   if (path.schema !== undefined) parts.push(`s:${encodeURIComponent(path.schema)}`)
@@ -35,7 +39,8 @@ export function decodeKey(key: string): TreePath {
     const colon = part.indexOf(':')
     const tag = part.slice(0, colon)
     const value = decodeURIComponent(part.slice(colon + 1))
-    if (tag === 'c') path.connection = value
+    if (tag === 'g') (path.group ??= []).push(value)
+    else if (tag === 'c') path.connection = value
     else if (tag === 'd') path.database = value
     else if (tag === 's') path.schema = value
     else if (tag === 'f') path.folder = value as Folder
@@ -46,6 +51,12 @@ export function decodeKey(key: string): TreePath {
     }
   }
   return path
+}
+
+/** A key's folder segments (`g:…/g:…/` before a connection; a folder's whole key) and the rest. */
+export function splitGroup(key: string): { prefix: string; rest: string } {
+  const match = /^(?:g:[^/]*(?:\/|$))*/.exec(key)![0]
+  return { prefix: match, rest: key.slice(match.length) }
 }
 
 /** `[name]`, with `]` doubled. */

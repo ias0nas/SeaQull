@@ -24,9 +24,13 @@ leaving Orca.
   statements.
 - **Exact values.** `decimal`, `numeric` and `money` are shown exactly, with no floating-point
   rounding, and `datetimeoffset` keeps its offset.
-- **Sign-in** with a SQL Server login (the password is kept in your OS keychain) or with Microsoft
-  Entra ID through the Azure CLI (no password stored).
+- **Sign-in** with a SQL Server login or with Microsoft Entra ID through the Azure CLI (no password
+  stored). A SQL login's user and password are optional: leave them out and SeaQull asks when it
+  connects, and keeps them in your OS keychain only if you tick *Remember*.
 - **Coloured connections**, so production stands out from development.
+- **Connection folders.** Give a connection a folder such as `Clients/Acme` to group it in the
+  explorer and the connection picker. Names stay unique across folders, because workbooks refer
+  to connections by name.
 
 ## Requirements
 
@@ -116,8 +120,8 @@ What it does not do:
 - **Credentials stay in the worker.** Passwords go into Orca's plugin secret store, which is
   encrypted with the macOS Keychain, Windows DPAPI or libsecret. Entra tokens are held only in memory. The
   console page runs in a sandboxed frame with no network access and never receives a password or token.
-- **Little stored.** The plugin's storage holds connection settings (name, server, port, database,
-  user and colour, never the password) and the ids of open sessions. The console page remembers
+- **Little stored.** The plugin's storage holds connection settings (name, folder, server, port,
+  database, user and colour, never the password) and the ids of open sessions. The console page remembers
   layout preferences such as the explorer's width. Exports go through Orca's save dialog.
 
 The worker and editor bundles are committed unminified, and `npm run check:bundles` rebuilds them

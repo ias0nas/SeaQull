@@ -1,15 +1,17 @@
-// The console's object explorer: saved connections → databases → schemas → objects → columns,
-// loaded lazily from the worker (tree.children). Plain DOM, keyboard driven like a native tree:
-// ↑/↓ move, →/← expand/collapse, Enter inserts the name (or toggles a container), Shift+F10 or
-// right-click opens the node's menu.
+// The console's object explorer: connection folders → saved connections → databases → schemas
+// → objects → columns, loaded lazily from the worker (tree.children). Plain DOM, keyboard driven
+// like a native tree: ↑/↓ move, →/← expand/collapse, Enter inserts the name (or toggles a
+// container), Shift+F10 or right-click opens the node's menu.
 import type { TreeNode, TreeNodeKind } from '../src/protocol.ts'
-import { decodeKey, isTableLike, sqlName, type TreePath } from '../src/shared/tree-keys.ts'
+import { folderSegments } from '../src/shared/folders.ts'
+import { decodeKey, encodeKey, isTableLike, sqlName, type TreePath } from '../src/shared/tree-keys.ts'
 import { icon } from './icons.ts'
 import { showMenu, type MenuItem } from './menu.ts'
 
 export type ExplorerActions = {
-  /** Children of a node; '' lists the connections. */
-  load(key: string): Promise<TreeNode[]>
+  /** Children of a node; '' lists the top-level folders and connections. `byUser`: the person
+   *  opened or refreshed it (a reload or an automatic expand is not). */
+  load(key: string, byUser: boolean): Promise<TreeNode[]>
   use(connectionId: string, database: string): void
   insert(text: string, ownLine?: boolean): void
   copy(text: string): void
@@ -20,9 +22,13 @@ export type ExplorerActions = {
   colorOf(connectionId: string): string | undefined
   /** A node was refreshed: what is cached about its connection (or database) is out of date. */
   refreshed?(connectionId: string, database?: string): void
-  newConnection(): void
+  /** `folder`: the folder to put it in. */
+  newConnection(folder?: string): void
   editConnection(connectionId: string): void
   deleteConnection(connectionId: string): void
+  renameFolder(folder: string): void
+  /** The connection's folder, if it has one. */
+  folderOf(connectionId: string): string | undefined
 }
 
 type Row = { node: TreeNode; depth: number; parent: string }
@@ -54,16 +60,42 @@ export class Explorer {
     })
   }
 
-  /** Highlights the console's connection and database; expands the connection the first time. */
+  /** Highlights the console's connection and database; expands the connection (and opens its
+   *  folders) the first time. */
   setCurrent(connectionId: string, database: string): void {
     this.current = { connectionId, database }
-    const key = this.rows.find((r) => r.node.kind === 'connection' && this.connectionOf(r.node.key) === connectionId)?.node.key
+    const key = connectionId && this.children.has('') ? this.connectionKey(connectionId) : ''
     if (key && !this.autoExpanded.has(key)) {
       // Once per connection: collapsing it afterwards sticks.
       this.autoExpanded.add(key)
-      if (!this.expanded.has(key)) return void this.toggle(key, true)
+      if (!this.expanded.has(key)) {
+        void this.openFolders(key).then((found) => {
+          if (found) void this.toggle(key, true, false)
+        })
+        return
+      }
     }
     this.render()
+  }
+
+  /** The folder of the selected folder or connection, if any. */
+  selectedFolder(): string | undefined {
+    return decodeKey(this.focused).group?.join('/')
+  }
+
+  /** Keeps a renamed folder's open levels and selection, and opens the folders it is in now. */
+  folderRenamed(from: string, to: string): void {
+    const before = encodeKey({ group: folderSegments(from) })
+    const segments = folderSegments(to)
+    const after = encodeKey({ group: segments })
+    const move = (key: string) => (key === before || key.startsWith(`${before}/`) ? after + key.slice(before.length) : key)
+    for (const set of [this.expanded, this.autoExpanded]) {
+      const keys = [...set]
+      set.clear()
+      for (const key of keys) set.add(move(key))
+    }
+    this.focused = move(this.focused)
+    for (let i = 1; i < segments.length; i++) this.expanded.add(encodeKey({ group: segments.slice(0, i) }))
   }
 
   /** Reloads the connections and every open level (connections were added, edited or removed). */
@@ -81,16 +113,18 @@ export class Explorer {
     const path = decodeKey(key)
     if (path.connection) this.actions.refreshed?.(path.connection, path.database)
     for (const k of [...this.children.keys()]) if (k === key || k.startsWith(`${key}/`)) this.children.delete(k)
-    await this.fetch(key)
+    await this.fetch(key, true)
     const open = [...this.expanded].filter((k) => k.startsWith(`${key}/`)).sort((a, b) => a.split('/').length - b.split('/').length)
-    for (const k of open) if (this.isReachable(k)) await this.fetch(k)
+    for (const k of open) if (this.isReachable(k)) await this.fetch(k, true)
   }
 
   /** Shows the active tab's connection and database in the tree. */
   async locate(): Promise<void> {
     const { connectionId, database } = this.current
-    const connectionKey = (this.children.get('') ?? []).find((n) => this.connectionOf(n.key) === connectionId)?.key
-    if (!connectionKey) return
+    if (!connectionId) return
+    if (!this.children.has('')) await this.fetch('')
+    const connectionKey = this.connectionKey(connectionId)
+    if (!(await this.openFolders(connectionKey))) return
     if (!this.expanded.has(connectionKey)) await this.toggle(connectionKey, true)
     const databaseKey = database ? this.children.get(connectionKey)?.find((n) => decodeKey(n.key).database === database)?.key : undefined
     this.focus(databaseKey ?? connectionKey)
@@ -123,10 +157,14 @@ export class Explorer {
     if (!this.children.has('')) await this.fetch('')
     let parent = ''
     let deepest = ''
+    if (path.connection !== undefined) {
+      const key = this.connectionKey(path.connection)
+      if (await this.openFolders(key)) parent = key.slice(0, Math.max(0, key.lastIndexOf('/')))
+    }
     for (const level of levels) {
       if (parent) {
         this.expanded.add(parent)
-        if (!this.children.has(parent) && !this.loading.has(parent)) await this.fetch(parent)
+        if (!this.children.has(parent) && !this.loading.has(parent)) await this.fetch(parent, true)
       }
       const node = (this.children.get(parent) ?? []).find((n) => n.kind !== 'error' && n.kind !== 'more' && same(decodeKey(n.key), level))
       if (!node) break
@@ -138,6 +176,26 @@ export class Explorer {
     this.root.focus({ preventScroll: true })
   }
 
+  /** Where a connection is in the tree, from its folder. */
+  private connectionKey(connectionId: string): string {
+    return encodeKey({ group: folderSegments(this.actions.folderOf(connectionId)), connection: connectionId })
+  }
+
+  /** Opens (loading as needed) the folders holding `key`; false when one of them is not there. */
+  private async openFolders(key: string): Promise<boolean> {
+    const parts = key.split('/')
+    let parent = ''
+    for (let i = 1; i < parts.length; i++) {
+      const folder = parts.slice(0, i).join('/')
+      if (!(this.children.get(parent) ?? []).some((n) => n.key === folder)) return false
+      this.expanded.add(folder)
+      if (!this.children.has(folder) && !this.loading.has(folder)) await this.fetch(folder)
+      parent = folder
+    }
+    this.render()
+    return (this.children.get(parent) ?? []).some((n) => n.key === key)
+  }
+
   collapseAll(): void {
     this.expanded.clear()
     this.render()
@@ -145,11 +203,11 @@ export class Explorer {
 
   // --- Loading and rendering --------------------------------------------------------------------
 
-  private async fetch(key: string): Promise<void> {
+  private async fetch(key: string, byUser = false): Promise<void> {
     this.loading.add(key)
     this.render()
     try {
-      this.children.set(key, await this.actions.load(key))
+      this.children.set(key, await this.actions.load(key, byUser))
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err)
       this.children.set(key, [{ key: `${key}/error:`, label: text, kind: 'error', hasChildren: false }])
@@ -169,12 +227,12 @@ export class Explorer {
     return this.children.has('') && (this.children.get('') ?? []).some((n) => n.key === parts[0])
   }
 
-  private async toggle(key: string, open = !this.expanded.has(key)): Promise<void> {
+  private async toggle(key: string, open = !this.expanded.has(key), byUser = true): Promise<void> {
     const row = this.rows.find((r) => r.node.key === key)
     if (row && !row.node.hasChildren) return
     if (open) this.expanded.add(key)
     else this.expanded.delete(key)
-    if (open && !this.children.has(key) && !this.loading.has(key)) await this.fetch(key)
+    if (open && !this.children.has(key) && !this.loading.has(key)) await this.fetch(key, byUser)
     else this.render()
   }
 
@@ -336,6 +394,13 @@ export class Explorer {
     const path = decodeKey(node.key)
     const connectionId = path.connection ?? ''
     const items: MenuItem[] = []
+    const folder = path.group?.join('/')
+    if (node.kind === 'group' && folder) {
+      items.push(
+        { label: 'New connection in this folder…', run: () => this.actions.newConnection(folder) },
+        { label: 'Rename folder…', run: () => this.actions.renameFolder(folder) }
+      )
+    }
     const name = sqlName(path, this.current.connectionId === connectionId ? this.current.database : undefined)
     if (node.kind === 'connection' || node.kind === 'database') {
       const database = path.database ?? ''
@@ -359,7 +424,7 @@ export class Explorer {
         { label: 'Edit connection…', run: () => this.actions.editConnection(connectionId) },
         { label: 'Delete connection…', danger: true, run: () => this.actions.deleteConnection(connectionId) },
         { separator: true },
-        { label: 'New connection…', run: () => this.actions.newConnection() }
+        { label: folder ? 'New connection in this folder…' : 'New connection…', run: () => this.actions.newConnection(folder) }
       )
     }
     return items.filter((item, i, all) => !('separator' in item) || (i > 0 && i < all.length - 1 && !('separator' in all[i - 1])))

@@ -79,6 +79,95 @@ test('tree answers are plain JSON at every level', async () => {
   assert.ok(columns.length > 0)
 })
 
+test('a connection in a folder: the folder levels, then its own levels under the folder keys; renaming the folder moves it', async () => {
+  const saved = await call('connections.save', {
+    name: 'Foldered', folder: 'Team/Dev', server: 'localhost', port: Number(process.env.MSSQL_PORT ?? 1433), database: '',
+    auth: { kind: 'sql', user: 'sa' }, password: process.env.MSSQL_SA_PASSWORD, encrypt: true, trustServerCertificate: true
+  })
+  try {
+    const root = await call('tree.children', { key: '' })
+    const team = root.find((n: any) => n.kind === 'group' && n.label === 'Team')
+    assert.ok(team, JSON.stringify(root))
+    assert.ok(root.findIndex((n: any) => n.kind === 'group') < root.findIndex((n: any) => n.kind === 'connection'))
+    const [dev] = await call('tree.children', { key: team.key })
+    assert.deepEqual([dev.kind, dev.label], ['group', 'Dev'])
+    const [connection] = await call('tree.children', { key: dev.key })
+    assert.deepEqual([connection.kind, connection.label, connection.key], ['connection', 'Foldered', `g:Team/g:Dev/c:${saved.id}`])
+    const dbs = await call('tree.children', { key: connection.key })
+    const aw = dbs.find((d: any) => d.label === 'AdventureWorks2022')
+    assert.equal(aw.key, `g:Team/g:Dev/c:${saved.id}/d:AdventureWorks2022`)
+    const schemas = await call('tree.children', { key: aw.key })
+    assert.ok(schemas.length > 0 && schemas.every((n: any) => n.key.startsWith(`${aw.key}/s:`)), JSON.stringify(schemas.slice(0, 2)))
+
+    assert.deepEqual(await call('connections.renameFolder', { from: 'Team', to: 'Squad' }), { moved: 1 })
+    const [moved] = await call('tree.children', { key: 'g:Squad/g:Dev' })
+    assert.equal(moved.key, `g:Squad/g:Dev/c:${saved.id}`)
+  } finally {
+    await call('connections.delete', { id: saved.id })
+  }
+})
+
+test('a connection without a saved login: requests ask for one; a wrong one given at sign-in is refused, then forgotten', async () => {
+  const base = { server: 'localhost', port: Number(process.env.MSSQL_PORT ?? 1433), database: '', encrypt: true, trustServerCertificate: true }
+  const saved = await call('connections.save', { ...base, name: 'No login', auth: { kind: 'sql', user: '' } })
+  try {
+    assert.ok(!(await call('connections.list', {})).find((c: any) => c.id === saved.id).passwordSaved)
+    const key = `c:${saved.id}`
+    await assert.rejects(call('tree.children', { key }), /Sign in to No login/)
+    await assert.rejects(call('databases.list', { connectionId: saved.id }), /Sign in to No login/)
+    await assert.rejects(call('query.run', { consoleId: 'tab-login', connectionId: saved.id, database: '', sql: 'SELECT 1', firstLine: 1 }), /Sign in to No login/)
+    assert.deepEqual(await call('connections.signInState', { id: saved.id }), { needed: true, name: 'No login', user: '' })
+    assert.deepEqual(await call('connections.test', { ...base, id: saved.id, name: 'No login', auth: { kind: 'sql', user: 'sa' } }), { ok: false, error: 'Enter a user and password to test.' })
+
+    await call('connections.signIn', { id: saved.id, user: 'sa', password: 'wrong', remember: false })
+    // Not an error row: the page asks again, with why.
+    await assert.rejects(call('tree.children', { key }), /Login failed/)
+    const state = await call('connections.signInState', { id: saved.id })
+    assert.equal(state.needed, true)
+    assert.match(state.failure, /Login failed/)
+
+    await call('connections.signIn', { id: saved.id, user: 'sa', password: process.env.MSSQL_SA_PASSWORD, remember: false })
+    assert.ok((await call('tree.children', { key })).some((n: any) => n.label === 'master'))
+    assert.ok(!JSON.stringify([...storage.values()]).includes(process.env.MSSQL_SA_PASSWORD!) && ![...secrets.keys()].includes(`password:${saved.id}`), 'not remembered')
+
+  } finally {
+    await call('connections.delete', { id: saved.id })
+  }
+})
+
+test('a sign-in to remember is saved only once the server accepts it', async () => {
+  const base = { server: 'localhost', port: Number(process.env.MSSQL_PORT ?? 1433), database: '', encrypt: true, trustServerCertificate: true }
+  const saved = await call('connections.save', { ...base, name: 'Remember me', auth: { kind: 'sql', user: '' } })
+  const key = `c:${saved.id}`
+  try {
+    await call('connections.signIn', { id: saved.id, user: 'sa', password: 'typo', remember: true })
+    await assert.rejects(call('tree.children', { key }), /Login failed/)
+    assert.ok(![...secrets.keys()].includes(`password:${saved.id}`), 'a refused login is not saved')
+    assert.deepEqual((await call('connections.list', {})).find((c: any) => c.id === saved.id).auth, { kind: 'sql', user: '' })
+    assert.equal((await call('connections.signInState', { id: saved.id })).needed, true)
+    await call('connections.signIn', { id: saved.id, user: 'sa', password: process.env.MSSQL_SA_PASSWORD, remember: true })
+    assert.ok((await call('tree.children', { key })).some((n: any) => n.label === 'master'))
+    const listed = (await call('connections.list', {})).find((c: any) => c.id === saved.id)
+    assert.deepEqual([listed.auth, listed.passwordSaved], [{ kind: 'sql', user: 'sa' }, true])
+  } finally {
+    await call('connections.delete', { id: saved.id })
+  }
+})
+
+test('a sign-in whose database cannot be opened is kept: only a refused login is forgotten', async () => {
+  const base = { server: 'localhost', port: Number(process.env.MSSQL_PORT ?? 1433), encrypt: true, trustServerCertificate: true }
+  const saved = await call('connections.save', { ...base, database: 'NoSuchDatabase', name: 'No such database', auth: { kind: 'sql', user: '' } })
+  try {
+    await call('connections.signIn', { id: saved.id, user: 'sa', password: process.env.MSSQL_SA_PASSWORD, remember: false })
+    const [failed] = await call('tree.children', { key: `c:${saved.id}` })
+    assert.equal(failed.kind, 'error')
+    assert.match(failed.label, /Cannot open database/)
+    assert.equal((await call('connections.signInState', { id: saved.id })).needed, false, 'the login is kept')
+  } finally {
+    await call('connections.delete', { id: saved.id })
+  }
+})
+
 test('tree errors come back as an error node', async () => {
   const nodes = await call('tree.children', { key: 'c:no-such-connection' })
   assert.equal(nodes[0].kind, 'error')
