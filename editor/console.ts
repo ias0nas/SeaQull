@@ -4,7 +4,7 @@
 // its own editor, results and SQL session in the worker (named by the tab's id: Orca gives every
 // console page the same caller id, and reloads the page whenever its Orca tab is shown again).
 // Queries run in the worker; this page polls status and pages rows.
-import type { Cell, ConnectionConfig, ExportFormat, RunStatus } from '../src/protocol.ts'
+import type { Cell, CellRange, ConnectionConfig, ExportFormat, RunStatus } from '../src/protocol.ts'
 import { cellText, EXPORT_FORMATS, exportResult } from '../src/shared/export.ts'
 import { headerEdit, parseHeader } from '../src/shared/sql-script.ts'
 import { locateAt, targetPath } from '../src/shared/locate.ts'
@@ -17,6 +17,7 @@ import { Explorer } from './explorer.ts'
 import { Grid, type CopyKind, type Range } from './grid.ts'
 import { icon } from './icons.ts'
 import { columnsFor, forgetNames, namesFor } from './name-cache.ts'
+import { request } from './request.ts'
 import { watchRun } from './run-watch.ts'
 import {
   closeCompletionPopup,
@@ -64,7 +65,13 @@ const ui = {
   includeHeaders: $<HTMLInputElement>('include-headers'),
   copyResult: $<HTMLButtonElement>('copy-result'),
   saveResult: $<HTMLButtonElement>('save-result'),
-  ready: $<HTMLButtonElement>('ready'),
+  readyDialog: $<HTMLDialogElement>('ready-dialog'),
+  readyTitle: $<HTMLSpanElement>('ready-title'),
+  readyWhy: $<HTMLSpanElement>('ready-why'),
+  readySize: $<HTMLParagraphElement>('ready-size'),
+  readyText: $<HTMLParagraphElement>('ready-text'),
+  readyOk: $<HTMLButtonElement>('ready-ok'),
+  readyCancel: $<HTMLButtonElement>('ready-cancel'),
   grid: $<HTMLDivElement>('grid'),
   messages: $<HTMLOListElement>('messages'),
   empty: $<HTMLDivElement>('empty')
@@ -314,7 +321,7 @@ doc.onReplace((text) => {
     if (!isWorkbookText(text)) return setStatus('The file is no longer a SeaQull workbook; reopen it to see it as text.', true)
     const removed = loadWorkbook(text)
     // Tabs the change removed: end their SQL sessions, as closing them would.
-    for (const tab of removed) void orca.plugin.request('query.close', { consoleId: tab.id }).catch(() => undefined)
+    for (const tab of removed) void request('query.close', { consoleId: tab.id }).catch(() => undefined)
     // Keep focus, the grid and any rename in progress unless the active tab itself went away.
     if (!tabs.some((t) => t.id === activeId)) showTab(tabs[0].id, { focus: false })
     else {
@@ -475,7 +482,7 @@ async function closeTab(tab: Tab): Promise<void> {
   tabs = tabs.filter((t) => t !== tab)
   disposeTab(tab)
   // Ends its SQL session in the worker (a running query is cancelled; temp tables go).
-  void orca.plugin.request('query.close', { consoleId: tab.id }).catch(() => undefined)
+  void request('query.close', { consoleId: tab.id }).catch(() => undefined)
   if (tabs.length === 0) {
     tabs = [createTab({ id: newId(), name: nextTabName([], tab.connectionName), named: false, connectionName: tab.connectionName, database: tab.database, sql: '' })]
   }
@@ -510,7 +517,7 @@ function renderColor(): void {
 const databaseLists = new Map<string, Promise<string[]>>()
 
 async function loadConnections(): Promise<void> {
-  connections = await orca.plugin.request('connections.list', {})
+  connections = await request('connections.list', {})
   databaseLists.clear()
   ui.connection.replaceChildren(
     option('', connections.length ? 'Choose a connection…' : 'No connections yet: add one in the explorer'),
@@ -551,7 +558,7 @@ async function syncPickers(): Promise<void> {
   let names: string[] = []
   try {
     if (!databaseLists.has(connection.id)) {
-      databaseLists.set(connection.id, orca.plugin.request('databases.list', { connectionId: connection.id }, { timeoutMs: 60_000 }))
+      databaseLists.set(connection.id, request('databases.list', { connectionId: connection.id }, { timeoutMs: 60_000 }))
     }
     names = await databaseLists.get(connection.id)!
     // An earlier connection's failure no longer applies.
@@ -663,14 +670,14 @@ async function startRun(tab: Tab, connectionId: string, database: string, sql: s
     tab.cancelPending = false
     tab.changesNames = CHANGES_NAMES.test(sql) ? connectionId : undefined
     // Large scripts go in parts (Orca caps a request at 64 KiB).
-    const { runId } = await sendRun((name, input) => orca.plugin.request(name, input), { consoleId: id, connectionId, database, sql, firstLine })
+    const { runId } = await sendRun((name, input) => request(name, input), { consoleId: id, connectionId, database, sql, firstLine })
     tab.maybeRunning = false
     tab.runId = runId
     // The worker dropped the previous run's results: take its grid down rather than leave it dead.
     tab.status = null
     tab.view = 0
     if (tab === active()) renderResults()
-    if (tab.cancelPending) void orca.plugin.request('query.cancel', { runId }).catch(() => undefined)
+    if (tab.cancelPending) void request('query.cancel', { runId }).catch(() => undefined)
     void follow(tab, runId)
   } catch (err) {
     setRunning(false, tab)
@@ -684,8 +691,8 @@ async function follow(tab: Tab, runId: string, initial?: RunStatus): Promise<voi
   const end = await watchRun(
     runId,
     {
-      status: (id, messagesFrom) => orca.plugin.request('query.status', { runId: id, messagesFrom }),
-      latest: async () => (await orca.plugin.request('query.latest', { consoleId: workbookMode ? tab.id : headerId(tab) })).status,
+      status: (id, messagesFrom) => request('query.status', { runId: id, messagesFrom }),
+      latest: async () => (await request('query.latest', { consoleId: workbookMode ? tab.id : headerId(tab) })).status,
       sleep: (ms) => new Promise((resolve) => (tab.pollTimer = window.setTimeout(resolve, ms))),
       current,
       progress: (status) => {
@@ -733,7 +740,7 @@ async function cancel(): Promise<void> {
     const runId = tab.runId
     setStatus('Cancelling…', false, tab)
     try {
-      await orca.plugin.request('query.cancel', { runId })
+      await request('query.cancel', { runId })
     } catch (err) {
       if ((err as { code?: string }).code === 'invalid_params') {
         // The worker no longer has the run (it restarted): nothing is running.
@@ -754,7 +761,7 @@ async function cancel(): Promise<void> {
     tab.cancelPending = true // the run is still being registered: startRun cancels it
     return
   }
-  await orca.plugin.request('query.cancel', { runId: tab.runId }).catch(() => undefined)
+  await request('query.cancel', { runId: tab.runId }).catch(() => undefined)
 }
 
 ui.run.addEventListener('click', () => void run())
@@ -818,12 +825,15 @@ function renderResults(): void {
   grid = new Grid(ui.grid, {
     columns: result.columns,
     rowCount: result.rowCount,
-    fetchRows: async (offset, limit) => (await orca.plugin.request('query.rows', { runId, result: index, offset, limit })).rows as Cell[][],
+    fetchRows: async (offset, limit) => {
+      const page = await request('query.rows', { runId, result: index, offset, limit })
+      return { rows: page.rows as Cell[][], cut: page.cut ?? [] }
+    },
     onCopy: (kind) => void copySelection(kind),
     onSelectionChange: (range) => {
       ui.resultInfo.textContent = range ? `${info} · ${describeRange(range)}` : info
       syncCopyButton(!!range)
-      resetExport() // a pending "Click to copy" holds the old selection
+      resetExport() // a pending "Ready to copy" holds the old selection
     },
     headers: () => ui.includeHeaders.checked
   })
@@ -860,26 +870,37 @@ function describeRange({ r0, r1, c0, c1 }: Range): string {
 async function copySelection(kind: CopyKind): Promise<void> {
   const viaKeys = kind === 'default' || kind === 'inverse'
   const headers = ui.includeHeaders.checked !== (kind === 'inverse')
-  await copyFromGrid(viaKeys ? 'tsv' : kind, headers, viaKeys)
-  // Keep focus on "Click to copy" when the copy needs one more click.
+  try {
+    await copyFromGrid(viaKeys ? 'tsv' : kind, headers, viaKeys)
+  } catch (err) {
+    setStatus(isBusy(err) ? errorText(err) : `Copy failed: ${errorText(err)}`, !isBusy(err))
+  }
+  // The "Ready to copy" dialog keeps the focus when the copy needs one more click.
   if (!pending) grid?.focus()
 }
 
-/** Copies the grid selection in a format; false when nothing is selected. */
+/** Copies the grid selection in a format; false when nothing is selected. Formatted here from the
+ *  loaded rows, or in the worker when some of the selected values arrived cut short. */
 async function copyFromGrid(format: ExportFormat, headers: boolean, rawSingleCell: boolean): Promise<boolean> {
   const source = grid
+  const { status, view } = active()
   const selected = await source?.selectedData()
   if (source && source !== grid) return true // the result changed while rows loaded: copy nothing
   if (!selected) return false
-  const { columns, rows, range } = selected
+  const { columns, rows, range, cut } = selected
   const raw = rawSingleCell && rows.length === 1 && columns.length === 1
   const tableName = ui.tableName.value.trim()
-  const text = raw ? cellText(rows[0][0]) : exportResult(format, { columns, rows, headers, ...(tableName ? { tableName } : {}) })
+  let text: string
+  if (cut && status && typeof view === 'number') {
+    const input = { runId: status.runId, result: view, format, headers, selection: range, ...(raw ? { raw } : {}), ...(tableName ? { tableName } : {}) }
+    let progressed = false
+    text = (await fetchExport(input, (p) => ((progressed = true), setStatus(`Copying… ${p}`)))).text
+    if (progressed) setStatus('')
+    if (source !== grid) return true
+  } else text = raw ? cellText(rows[0][0]) : exportResult(format, { columns, rows, headers, ...(tableName ? { tableName } : {}) })
   const delimited = format === 'csv' || format === 'tsv'
   const what = `${describeRange(range).replace(' selected', '')}${!raw && delimited ? (headers ? ' with headers' : ' without headers') : ''} as ${raw ? 'text' : formatLabel(format)}`
-  const data: Prepared = { key: '', fileName: '', mimeType: 'text/plain', text, rows: rows.length, what }
-  if (stillActive()) copyPrepared(data)
-  else offerClick('copy', data)
+  await deliver('copy', { key: '', fileName: '', mimeType: 'text/plain', text, rows: rows.length, what })
   return true
 }
 
@@ -893,9 +914,9 @@ function syncCopyButton(hasSelection: boolean): void {
 
 // --- Copy and save: format in the worker, fetch in chunks, then copy or show the save dialog ------
 // Both need a click or key press in the last few seconds (Chromium's transient activation). A
-// large result can take longer to fetch; then the button asks for one more click.
+// large result can take longer to fetch; then a dialog asks for one more click.
 
-type Prepared = { key: string; fileName: string; mimeType: string; text: string; rows: number; what?: string }
+type Prepared = { key: string; fileName: string; mimeType: string; text: string; rows: number; what: string }
 let prepared: Prepared | null = null
 let pending: { action: 'copy' | 'save'; data: Prepared } | null = null
 
@@ -925,14 +946,19 @@ ui.format.addEventListener('change', () => {
 })
 ui.tableName.addEventListener('input', () => resetExport())
 
-/** An export is being prepared: the buttons stay disabled until it is done. */
+/** A copy or export is being fetched from the worker. One at a time: each export.prepare replaces
+ *  the run's previous export, which would leave the other one unfinished. */
 let exporting = false
+/** The Copy or Save button's action is under way. */
+let buttonBusy = false
+const syncExportButtons = () => (ui.copyResult.disabled = ui.saveResult.disabled = exporting || buttonBusy)
+const isBusy = (err: unknown) => (err as { busy?: boolean } | null)?.busy === true
 
 function resetExport(): void {
   prepared = null
   pending = null
-  ui.ready.hidden = true
-  if (!exporting) ui.copyResult.disabled = ui.saveResult.disabled = false
+  if (ui.readyDialog.open) ui.readyDialog.close()
+  syncExportButtons()
 }
 
 /** The current result in the chosen format; reused while nothing changes. */
@@ -950,17 +976,35 @@ async function prepare(progress: (text: string) => void): Promise<Prepared> {
   }
   const key = JSON.stringify(input)
   if (prepared?.key === key) return prepared
-  const info = await orca.plugin.request('export.prepare', input)
-  let text = ''
-  for (let i = 0; i < info.chunks; i++) {
-    if (info.chunks > 1) progress(`${Math.round((i / info.chunks) * 100)}%`)
-    text += (await orca.plugin.request('export.chunk', { exportId: info.exportId, index: i })).text
-  }
+  const { fileName, mimeType, text } = await fetchExport(input, progress)
   const rows = status.results[view].rowCount
   const bare = !input.headers && (input.format === 'csv' || input.format === 'tsv')
   const what = `${rows.toLocaleString()} rows${bare ? ' without headers' : ''} as ${formatLabel(input.format)}`
-  prepared = { key, fileName: info.fileName, mimeType: info.mimeType, text, rows, what }
+  prepared = { key, fileName, mimeType, text, rows, what }
   return prepared
+}
+
+/** Formats in the worker and fetches the text in chunks of up to about 900 KB. */
+type ExportRequest = { runId: string; result: number; format: ExportFormat; headers: boolean; tableName?: string; selection?: CellRange; raw?: boolean }
+
+async function fetchExport(input: ExportRequest, progress: (text: string) => void) {
+  if (exporting) throw Object.assign(new Error('Still getting the last copy or export ready: try again when it is done.'), { busy: true })
+  exporting = true
+  syncExportButtons()
+  try {
+    const info = await request('export.prepare', input)
+    let text = ''
+    for (let offset: number | null = 0; offset !== null; ) {
+      if (offset > 0) progress(`${Math.round((offset / info.length) * 100)}%`)
+      const chunk: { text: string; next: number | null } = await request('export.chunk', { exportId: info.exportId, offset })
+      text += chunk.text
+      offset = chunk.next
+    }
+    return { fileName: info.fileName, mimeType: info.mimeType, text }
+  } finally {
+    exporting = false
+    syncExportButtons()
+  }
 }
 
 /** Writes the clipboard (plugin frames may write it, never read it, right after a click or key press). */
@@ -983,55 +1027,89 @@ function writeClipboard(text: string): boolean {
 const formatLabel = (format = ui.format.value) => EXPORT_FORMATS.find((f) => f.format === format)?.label ?? format
 const stillActive = () => (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive !== false
 
-function copyPrepared(data: Prepared): void {
-  const size = formatBytes(new Blob([data.text]).size)
-  if (writeClipboard(data.text)) {
-    setStatus(`Copied ${data.what ?? `${data.rows.toLocaleString()} rows as ${formatLabel()}`} (${size})`)
-    resetExport()
-  } else offerClick('copy', data)
+/** `again`: it needs another click or key press (the last one expired); `failed`: it went wrong,
+ *  and the fetched text is kept for another try. */
+type Outcome = 'done' | 'again' | 'failed'
+
+function copyPrepared(data: Prepared): Outcome {
+  if (!writeClipboard(data.text)) return 'again'
+  setStatus(`Copied ${data.what} (${formatBytes(new Blob([data.text]).size)})`)
+  return 'done'
 }
 
-async function savePrepared(data: Prepared): Promise<void> {
-  if (!orca.files) return setStatus('Saving files needs the Orca desktop app.', true)
+async function savePrepared(data: Prepared): Promise<Outcome> {
+  if (!orca.files) {
+    setStatus('Saving files needs the Orca desktop app.', true)
+    return 'failed'
+  }
   try {
     const { status: saved } = await orca.files.saveAs({ suggestedName: data.fileName, mimeType: data.mimeType, data: data.text })
     setStatus(saved === 'saved' ? `Saved ${data.fileName}` : 'Save cancelled')
-    resetExport()
+    return 'done'
   } catch (err) {
-    // The click had expired by the time the data arrived: ask for another.
-    if ((err as { code?: string }).code === 'not_permitted') offerClick('save', data)
-    else setStatus(`Save failed: ${errorText(err)}`, true)
+    if ((err as { code?: string }).code === 'not_permitted') return 'again'
+    setStatus(`Save failed: ${errorText(err)}`, true)
+    return 'failed'
   }
 }
 
-/** The data took too long for the original click to count: one more click finishes the job. */
-function offerClick(action: 'copy' | 'save', data: Prepared): void {
-  pending = { action, data }
-  const size = formatBytes(new Blob([data.text]).size)
-  ui.ready.textContent = action === 'copy' ? `Click to copy (${size})` : `Click to save ${data.fileName} (${size})`
-  ui.ready.hidden = false
-  ui.ready.focus()
+/** Copies or saves `data`, or, when the click or key press that asked for it has expired, asks for another. */
+async function deliver(action: 'copy' | 'save', data: Prepared): Promise<void> {
+  const outcome = !stillActive() ? 'again' : action === 'copy' ? copyPrepared(data) : await savePrepared(data)
+  if (outcome === 'done') resetExport()
+  else if (outcome === 'again') askToFinish(action, data)
 }
+
+ui.readyWhy.innerHTML = icon('info')
+const READY_WHY =
+  'Large results are loaded in parts of about 1 MB, which can take a few seconds.\n' +
+  'For security, copying and saving only work within a few seconds of a click. If loading takes longer, one more click is needed.'
+ui.readyWhy.title = READY_WHY
+ui.readyWhy.setAttribute('role', 'img')
+ui.readyWhy.setAttribute('aria-label', READY_WHY)
+
+/** A dialog whose button finishes the copy or save with a click of its own; it stays open until that works. */
+function askToFinish(action: 'copy' | 'save', data: Prepared): void {
+  pending = { action, data }
+  const copy = action === 'copy'
+  ui.readyTitle.textContent = copy ? 'Ready to copy' : 'Ready to save'
+  ui.readySize.textContent = `${formatBytes(new Blob([data.text]).size)} · ${data.what}`
+  ui.readyText.textContent = copy ? 'Click Copy to put it on the clipboard.' : `Click Save… to choose where to save ${data.fileName}.`
+  ui.readyOk.textContent = copy ? 'Copy' : 'Save…'
+  if (!ui.readyDialog.open) ui.readyDialog.showModal()
+  ui.readyOk.focus()
+}
+
+ui.readyOk.addEventListener('click', async () => {
+  if (!pending) return
+  const { action, data } = pending
+  const outcome = action === 'copy' ? copyPrepared(data) : await savePrepared(data)
+  if (pending?.data !== data) return
+  if (outcome === 'again') {
+    ui.readyText.textContent = action === 'copy' ? "Couldn't copy. Click Copy again." : "Couldn't save. Click Save… again."
+    return
+  }
+  if (outcome === 'failed') ui.readyDialog.close()
+  else resetExport()
+  grid?.focus()
+})
+ui.readyCancel.addEventListener('click', () => ui.readyDialog.close())
+ui.readyDialog.addEventListener('close', () => (pending = null))
 
 async function runExport(action: 'copy' | 'save', button: HTMLButtonElement): Promise<void> {
   const { status, view } = active()
-  if (!status || typeof view !== 'number') return
-  if (exporting) return
+  if (!status || typeof view !== 'number' || buttonBusy) return
   const label = button.querySelector('span')!
-  exporting = true
-  ui.copyResult.disabled = ui.saveResult.disabled = true
-  ui.ready.hidden = true
+  buttonBusy = true
+  syncExportButtons()
   try {
     if (action === 'copy' && (await copyFromGrid(ui.format.value as ExportFormat, ui.includeHeaders.checked, false))) return
-    const data = await prepare((p) => (label.textContent = p))
-    if (!stillActive()) offerClick(action, data)
-    else if (action === 'copy') copyPrepared(data)
-    else await savePrepared(data)
+    await deliver(action, await prepare((p) => (label.textContent = p)))
   } catch (err) {
-    setStatus(`${action === 'copy' ? 'Copy' : 'Export'} failed: ${errorText(err)}`, true)
+    setStatus(isBusy(err) ? errorText(err) : `${action === 'copy' ? 'Copy' : 'Export'} failed: ${errorText(err)}`, !isBusy(err))
   } finally {
-    exporting = false
-    ui.copyResult.disabled = ui.saveResult.disabled = false
+    buttonBusy = false
+    syncExportButtons()
     // Labels from the current state (the selection may have changed meanwhile), not the old text.
     ui.saveResult.querySelector('span')!.textContent = 'Save…'
     syncCopyButton(!!grid?.selection())
@@ -1040,19 +1118,13 @@ async function runExport(action: 'copy' | 'save', button: HTMLButtonElement): Pr
 
 ui.copyResult.addEventListener('click', () => void runExport('copy', ui.copyResult))
 ui.saveResult.addEventListener('click', () => void runExport('save', ui.saveResult))
-ui.ready.addEventListener('click', () => {
-  if (!pending) return
-  const { action, data } = pending
-  if (action === 'copy') copyPrepared(data)
-  else void savePrepared(data)
-})
 
 const formatBytes = (n: number) => (n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`)
 
 // --- Keyboard ---------------------------------------------------------------------------------
 
 document.addEventListener('keydown', (event) => {
-  // A modal dialog (connection, confirm) owns the keyboard: no running or copying behind it.
+  // A modal dialog (connection, confirm, ready to copy) owns the keyboard: no running or copying behind it.
   if (document.querySelector('dialog[open]')) return
   const mod = event.metaKey || event.ctrlKey
   if (mod && event.key === 'Enter') {
@@ -1149,7 +1221,7 @@ async function deleteConnection(connectionId: string): Promise<void> {
   if (!connection) return
   if (!(await confirmDialog(`Delete the connection "${connection.name}"? Its saved password is deleted too. Tabs that use it keep their SQL.`, 'Delete'))) return
   try {
-    await orca.plugin.request('connections.delete', { id: connectionId })
+    await request('connections.delete', { id: connectionId })
   } catch (err) {
     setStatus(errorText(err), true)
   }
@@ -1157,7 +1229,7 @@ async function deleteConnection(connectionId: string): Promise<void> {
 }
 
 const explorer = new Explorer(ui.tree, {
-  load: (key) => orca.plugin.request('tree.children', { key }, { timeoutMs: 60_000 }),
+  load: (key) => request('tree.children', { key }, { timeoutMs: 60_000 }),
   use: (connectionId, database) => void setTarget(active(), connectionId, database),
   insert: insertText,
   copy: copyText,

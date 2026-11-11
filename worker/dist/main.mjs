@@ -69457,7 +69457,7 @@ checkExactValues().catch(() => void 0);
   const problem = ipServernameProblem(messageIoModule);
   if (problem) console.warn(`SeaQull: servers given as IP addresses may fail to connect over TLS: ${problem}`);
 }
-var MAX_CELL_CHARS = 2e5;
+var MAX_CELL_CHARS = 2e7;
 function openConnection(endpoint, credentials, { requestTimeout = 0 } = {}) {
   const authentication = credentials.kind === "sql" ? { type: "default", options: { userName: credentials.user, password: credentials.password } } : { type: "azure-active-directory-access-token", options: { token: credentials.token } };
   const connection = new import_tedious.Connection({
@@ -69533,7 +69533,9 @@ function runBatch(connection, sql, events, signal) {
     });
     request.on("row", (columns) => {
       if (stopped) return;
-      const keepGoing = events.onRow(columns.map((c) => toCell(c.value, c.metadata)));
+      const cut = [];
+      const cells = columns.map((c, i) => toCell(c.value, c.metadata, (length) => cut.push([i, length])));
+      const keepGoing = events.onRow(cells, cut);
       if (!keepGoing) {
         stopped = true;
         connection.cancel();
@@ -69607,14 +69609,16 @@ function timePart(d, scale = 3) {
   return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}${fraction ? `.${fraction}` : ""}`;
 }
 var TRUNCATED_RE = /… \[truncated, (\d+) chars\]$/;
+var truncationMarker = (length) => `… [truncated, ${length} chars]`;
 function truncateText(text2, keep, originalLength = text2.length) {
-  const marked = TRUNCATED_RE.exec(text2);
+  const marked = TRUNCATED_RE.exec(text2.slice(-64));
   const length = marked ? Number(marked[1]) : originalLength;
-  const body = marked ? text2.slice(0, marked.index) : text2;
-  return `${body.slice(0, keep)}… [truncated, ${length} chars]`;
+  const body = marked ? text2.slice(0, text2.length - marked[0].length) : text2;
+  const high = body.charCodeAt(keep - 1);
+  const end = high >= 55296 && high <= 56319 ? keep - 1 : keep;
+  return `${body.slice(0, end)}${truncationMarker(length)}`;
 }
-var truncated = (text2, length) => truncateText(text2, MAX_CELL_CHARS, length);
-function toCell(value, meta) {
+function toCell(value, meta, onCut) {
   if (value === null || value === void 0) return null;
   const baseType = baseTypeOf(meta);
   if (value instanceof Date) {
@@ -69632,14 +69636,19 @@ function toCell(value, meta) {
     }
   }
   if (Buffer.isBuffer(value)) {
+    const length = value.length * 2 + 2;
     const hex = `0x${value.subarray(0, MAX_CELL_CHARS / 2).toString("hex").toUpperCase()}`;
-    return value.length * 2 + 2 > MAX_CELL_CHARS ? truncated(hex, value.length * 2 + 2) : hex;
+    if (length <= MAX_CELL_CHARS) return hex;
+    onCut?.(length);
+    return truncateText(hex, MAX_CELL_CHARS, length);
   }
   if (typeof value === "bigint") return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
   if (typeof value === "number" || typeof value === "boolean") return Number.isFinite(value) || typeof value === "boolean" ? value : String(value);
   if (typeof value === "string") {
     if (baseType === "bigint" && Number.isSafeInteger(Number(value))) return Number(value);
-    return value.length > MAX_CELL_CHARS ? truncated(value, value.length) : value;
+    if (value.length <= MAX_CELL_CHARS) return value;
+    onCut?.(value.length);
+    return truncateText(value, MAX_CELL_CHARS);
   }
   return String(value);
 }
@@ -69812,14 +69821,14 @@ async function completionNames(connection) {
   );
   const schemas = /* @__PURE__ */ new Map();
   if (defaultSchema) schemas.set(defaultSchema, []);
-  let truncated2 = rows.length > MAX_NAMES;
+  let truncated = rows.length > MAX_NAMES;
   let bytes = 0;
   for (const row of rows.slice(0, MAX_NAMES)) {
     const schema = String(row.schema_name);
     const name = String(row.name);
     bytes += Buffer.byteLength(JSON.stringify(name)) + 8;
     if (bytes > MAX_BYTES) {
-      truncated2 = true;
+      truncated = true;
       break;
     }
     let objects = schemas.get(schema);
@@ -69835,7 +69844,7 @@ async function completionNames(connection) {
     defaultSchema,
     caseSensitive: info?.case_sensitive === true,
     schemas: [...schemas].map(([name, objects]) => ({ name, objects })),
-    truncated: truncated2
+    truncated
   };
 }
 var MAX_COLUMN_OBJECTS = 50;
@@ -70234,6 +70243,32 @@ function toSqlInserts({ columns, tableName }) {
   };
 }
 
+// src/shared/json-bytes.ts
+function jsonUnitAt(text2, i) {
+  const c = text2.charCodeAt(i);
+  if (c === 34 || c === 92) return [2, 1];
+  if (c < 32) return [c === 8 || c === 9 || c === 10 || c === 12 || c === 13 ? 2 : 6, 1];
+  if (c < 128) return [1, 1];
+  if (c < 2048) return [2, 1];
+  if (c >= 55296 && c <= 56319) {
+    const next = text2.charCodeAt(i + 1);
+    if (next >= 56320 && next <= 57343) return [4, 2];
+  }
+  if (c >= 55296 && c <= 57343) return [6, 1];
+  return [3, 1];
+}
+function jsonFit(text2, from, maxBytes) {
+  let bytes = 0;
+  let i = from;
+  while (i < text2.length) {
+    const [b, units] = jsonUnitAt(text2, i);
+    if (bytes + b > maxBytes) break;
+    bytes += b;
+    i += units;
+  }
+  return [i, bytes];
+}
+
 // src/shared/sql-script.ts
 var GO_RE = /^\s*go(?:\s+(\d+))?\s*;?\s*(?:--.*)?$/i;
 function splitBatches(text2) {
@@ -70301,7 +70336,7 @@ function scanLine(line, start) {
 
 // worker/runs.ts
 var PAGE_BYTE_BUDGET = 7e5;
-var EXPORT_CHUNK_CHARS = 15e4;
+var EXPORT_CHUNK_BYTES = 9e5;
 var SESSION_IDLE_MS = 30 * 6e4;
 var RUN_TTL_MS = 60 * 6e4;
 var EXPORT_TTL_MS = 10 * 6e4;
@@ -70313,9 +70348,11 @@ var MAX_MESSAGE_CHARS = 4e3;
 var INFO_BUDGET = { count: 900, bytes: 3e5 };
 var ERROR_BUDGET = { count: 100, bytes: 15e4 };
 var RESULT_BUDGET = { count: 500, bytes: 2e5 };
+var PREVIEW_CHARS = 500;
 var ROW_BYTE_BUDGET = 6e5;
 var RUN_BYTE_BUDGET = 1e8;
 var WORKER_BYTE_BUDGET = 4e8;
+var MAX_ROW_BYTES = RUN_BYTE_BUDGET / 2;
 var ROW_OVERHEAD = 64;
 var CELL_OVERHEAD = 16;
 var END_REASONS = {
@@ -70483,6 +70520,7 @@ var RunManager = class {
     const dropped = { info: 0, error: 0, results: 0 };
     let sawError = false;
     let memoryLimit = "";
+    let overCap = 0;
     const note = (message, always = false) => {
       if (message.kind === "error") sawError = true;
       const text2 = message.text.length > MAX_MESSAGE_CHARS ? `${message.text.slice(0, MAX_MESSAGE_CHARS)}… [truncated]` : message.text;
@@ -70539,13 +70577,15 @@ var RunManager = class {
                 current = { summary, rows: [] };
                 run.results.push(current);
               },
-              onRow: (cells) => {
+              onRow: (cells, capped2) => {
                 if (!current) return true;
                 if (current.rows.length >= maxRows) {
                   current.summary.truncated = true;
                   return false;
                 }
-                const bytes = capRow(cells) + ROW_OVERHEAD + cells.length * CELL_OVERHEAD;
+                const cut = new Map(capped2);
+                fitRow(cells, cut);
+                const bytes = rowBytes(cells) + ROW_OVERHEAD + cells.length * CELL_OVERHEAD;
                 if (run.bytes + bytes > RUN_BYTE_BUDGET) memoryLimit = "this run";
                 else if (this.keptBytes + bytes > WORKER_BYTE_BUDGET) memoryLimit = "all open results together";
                 if (memoryLimit) {
@@ -70556,6 +70596,11 @@ var RunManager = class {
                 this.keptBytes += bytes;
                 current.rows.push(cells);
                 current.summary.rowCount = current.rows.length;
+                if (cut.size > 0) {
+                  ;
+                  (current.cut ??= /* @__PURE__ */ new Map()).set(current.rows.length - 1, cut);
+                  overCap += cut.size;
+                }
                 return true;
               },
               onStatementDone: (rowCount, hadResult) => {
@@ -70592,6 +70637,13 @@ var RunManager = class {
     }
     if (dropped.results > 0) {
       run.messages.push({ kind: "info", text: `… ${dropped.results} more result sets not kept (SeaQull keeps at most ${RESULT_BUDGET.count} per run).` });
+    }
+    if (overCap > 0) {
+      const values = overCap === 1 ? "1 value was" : `${overCap.toLocaleString("en-US")} values were`;
+      run.messages.push({
+        kind: "info",
+        text: `${values} cut short: SeaQull keeps up to ${MAX_CELL_CHARS.toLocaleString("en-US")} characters of a value, and about ${(MAX_ROW_BYTES / 2).toLocaleString("en-US")} of a row. The grid, copies and exports all have the cut values.`
+      });
     }
     if (dropped.error > 0) run.messages.push({ kind: "error", text: `… ${dropped.error} more errors not shown.` });
     if (dropped.info > 0) run.messages.push({ kind: "info", text: `… ${dropped.info} more messages not shown.` });
@@ -70645,25 +70697,31 @@ var RunManager = class {
     const run = this.get(runId);
     if (run.state === "running") run.abort.abort();
   }
+  /** Rows from `offset`, as many as fit in one answer, with long values cut short (see ValueCut). */
   rows(runId, result, offset, limit) {
     const data = this.result(runId, result);
     if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1) throw invalid("offset and limit must be whole numbers ≥ 0 and ≥ 1");
     const rows = [];
+    const cut = [];
     let bytes = 0;
     for (let i = offset; i < Math.min(offset + limit, data.rows.length); i++) {
-      const size = jsonBytes(data.rows[i]);
+      const preview = previewRow(data.rows[i], data.cut?.get(i));
+      const entries = preview.cut.map((entry) => [rows.length, ...entry]);
+      const size = jsonBytes(preview.cells) + entries.reduce((sum, entry) => sum + jsonBytes(entry) + 1, 0);
       if (rows.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
-      rows.push(data.rows[i]);
+      cut.push(...entries);
+      rows.push(preview.cells);
       bytes += size;
     }
-    return { offset, rows };
+    return { offset, rows, cut };
   }
   /**
    * Gets an export ready: works out where each row's text starts, a few thousand rows at a time so
    * other requests get through, but keeps no text; export.chunk formats its stretch on demand. One
    * export per run (a new one replaces the last), counted in the worker's memory budget.
+   * `selection`: only those rows and columns (a grid selection); `raw`: one selected cell's text.
    */
-  async prepareExport(runId, result, format, tableName, headers = true) {
+  async prepareExport(runId, result, format, tableName, headers = true, selection, raw = false) {
     let info;
     try {
       info = formatInfo(format);
@@ -70671,13 +70729,21 @@ var RunManager = class {
       throw invalid(err.message);
     }
     const data = this.result(runId, result);
+    const range = selection ?? { r0: 0, r1: data.rows.length - 1, c0: 0, c1: data.summary.columns.length - 1 };
+    if (selection !== void 0 && !withinResult(selection, data.rows.length, data.summary.columns.length)) {
+      throw invalid("selection must be rows r0…r1 and columns c0…c1 of the result");
+    }
+    if (raw && (!selection || range.r0 !== range.r1 || range.c0 !== range.c1)) throw invalid("raw needs a selection of one cell");
     for (const [id, prepared] of this.exports) if (prepared.runId === runId) this.dropExport(id);
-    const rows = data.rows.slice();
+    const rows = data.rows.slice(range.r0, range.r1 + 1);
     const bytes = (rows.length + 2) * 8 + rows.length * 8;
     if (this.keptBytes + bytes > WORKER_BYTE_BUDGET) {
       throw new Error("Not enough of SeaQull's memory left to export this result: close tabs whose results you no longer need, then try again.");
     }
-    const parts = exportParts(format, { columns: data.summary.columns, rows, tableName, headers });
+    const allColumns = range.c0 === 0 && range.c1 === data.summary.columns.length - 1;
+    const columns = data.summary.columns.slice(range.c0, range.c1 + 1);
+    const formatted = exportParts(format, { columns, rows, tableName, headers });
+    const parts = raw ? { head: "", row: (cells) => cellText(cells[range.c0]), tail: "" } : allColumns ? formatted : { ...formatted, row: (cells, i) => formatted.row(cells.slice(range.c0, range.c1 + 1), i) };
     const ends = new Float64Array(rows.length + 2);
     let end = parts.head.length;
     ends[0] = end;
@@ -70695,35 +70761,47 @@ var RunManager = class {
     this.keptBytes += bytes;
     const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
     const base = tableName?.replace(/[\[\]]/g, "").replace(/[^\w.-]+/g, "_") || "result";
-    const chunks = Math.max(1, Math.ceil(length / EXPORT_CHUNK_CHARS));
-    return { exportId, chunks, length, fileName: `${base}-${stamp}.${info.extension}`, mimeType: info.mimeType };
+    return { exportId, length, fileName: `${base}-${stamp}.${info.extension}`, mimeType: info.mimeType };
   }
-  /** Characters [index × EXPORT_CHUNK_CHARS, + EXPORT_CHUNK_CHARS) of the export, formatted now. */
-  exportChunk(exportId, index) {
+  /** The export's text from character `offset`, as much as fits in EXPORT_CHUNK_BYTES, formatted
+   *  now; `next` is where the following chunk starts (null: this was the last). */
+  exportChunk(exportId, offset) {
     const prepared = this.exports.get(exportId);
-    const { ends } = prepared ?? { ends: new Float64Array(0) };
-    const length = ends[ends.length - 1] ?? 0;
-    const chunks = Math.max(1, Math.ceil(length / EXPORT_CHUNK_CHARS));
-    if (!prepared || !Number.isInteger(index) || index < 0 || index >= chunks) throw invalid("Export expired: export again.");
-    const { parts, rows } = prepared;
-    const from = index * EXPORT_CHUNK_CHARS;
-    const to = Math.min(from + EXPORT_CHUNK_CHARS, length);
+    const length = prepared?.ends[prepared.ends.length - 1] ?? 0;
+    if (!prepared || !Number.isInteger(offset) || offset < 0 || offset > length) throw invalid("Export expired: export again.");
+    const { ends, parts, rows } = prepared;
     let lo = 0;
     let hi = ends.length - 1;
     while (lo < hi) {
       const mid = lo + hi >> 1;
-      if (ends[mid] > from) hi = mid;
+      if (ends[mid] > offset) hi = mid;
       else lo = mid + 1;
     }
     let text2 = "";
-    for (let piece = lo; piece < ends.length; piece++) {
+    let at = offset;
+    let budget = EXPORT_CHUNK_BYTES;
+    for (let piece = lo; piece < ends.length && at < length; piece++) {
       const start = piece === 0 ? 0 : ends[piece - 1];
-      if (start >= to) break;
-      const whole = piece === 0 ? parts.head : piece === ends.length - 1 ? parts.tail : parts.row(rows[piece - 1], piece - 1);
-      text2 += whole.slice(Math.max(0, from - start), to - start);
+      if (ends[piece] <= at) continue;
+      const isRow = piece > 0 && piece < ends.length - 1;
+      const whole = piece === 0 ? parts.head : !isRow ? parts.tail : prepared.last?.piece === piece ? prepared.last.text : parts.row(rows[piece - 1], piece - 1);
+      const [end, bytes] = jsonFit(whole, at - start, budget);
+      text2 += whole.slice(at - start, end);
+      budget -= bytes;
+      at = start + end;
+      if (isRow) this.keepPiece(prepared, end < whole.length ? { piece, text: whole } : void 0);
+      if (end < whole.length) break;
     }
-    if (index === chunks - 1) setTimeout(() => this.dropExport(exportId), 6e4).unref?.();
-    return text2;
+    const next = at < length ? at : null;
+    if (next === null) setTimeout(() => this.dropExport(exportId), 6e4).unref?.();
+    return { text: text2, next };
+  }
+  keepPiece(prepared, last) {
+    if (prepared.last === last || prepared.last && last && prepared.last.piece === last.piece) return;
+    const change = (last?.text.length ?? 0) * 2 - (prepared.last?.text.length ?? 0) * 2;
+    prepared.last = last;
+    prepared.bytes += change;
+    this.keptBytes += change;
   }
   dropExport(exportId) {
     const prepared = this.exports.get(exportId);
@@ -70838,25 +70916,74 @@ async function probeTransaction(connection, query = queryRows, timeoutMs = TRANS
     clearTimeout(timer);
   }
 }
+var withinResult = (range, rows, columns) => {
+  const { r0, r1, c0, c1 } = range ?? {};
+  const index = (n, size) => Number.isInteger(n) && n >= 0 && n < size;
+  return index(r0, rows) && index(r1, rows) && index(c0, columns) && index(c1, columns) && r0 <= r1 && c0 <= c1;
+};
 var connectionLost = () => new Error("Connection lost (the server closed it, or the network dropped): the rest of the script did not run. Run again to reconnect.");
-function capRow(cells) {
-  const chars = cells.reduce((sum, c) => sum + (typeof c === "string" ? c.length : 0), 0);
-  if (chars * 6 + cells.length * 8 <= ROW_BYTE_BUDGET) return chars * 2 + cells.length * 8;
-  const size = (c) => typeof c === "string" ? jsonBytes(c) : 8;
-  let total = cells.reduce((sum, c) => sum + size(c), 0);
-  while (total > ROW_BYTE_BUDGET) {
+function rowBytes(cells) {
+  let chars = 0;
+  for (const c of cells) if (typeof c === "string") chars += c.length;
+  return chars * 2 + cells.length * 8;
+}
+function fitRow(cells, cut, maxBytes = MAX_ROW_BYTES) {
+  let bytes = rowBytes(cells);
+  while (bytes > maxBytes) {
     let largest = -1;
     cells.forEach((c, i) => {
-      if (typeof c === "string" && (largest === -1 || size(c) > size(cells[largest]))) largest = i;
+      if (typeof c === "string" && (largest === -1 || c.length > cells[largest].length)) largest = i;
     });
-    if (largest === -1) break;
-    const before = cells[largest];
-    const keep = Math.floor(before.replace(/… \[truncated, \d+ chars\]$/, "").length / 2);
-    cells[largest] = truncateText(before, keep);
-    total += size(cells[largest]) - size(before);
-    if (keep === 0) break;
+    const text2 = largest === -1 ? "" : cells[largest];
+    if (text2.length < 1e3) return;
+    const whole = cut.get(largest) ?? text2.length;
+    cells[largest] = truncateText(text2, Math.floor(text2.length / 2), whole);
+    cut.set(largest, whole);
+    bytes += (cells[largest].length - text2.length) * 2;
   }
-  return total;
+}
+function previewRow(cells, stored) {
+  let out = cells;
+  const kept = /* @__PURE__ */ new Map();
+  const shorten = (i, keep) => {
+    const full = cells[i];
+    const high = full.charCodeAt(keep - 1);
+    const end = high >= 55296 && high <= 56319 ? keep - 1 : keep;
+    if (out === cells) out = cells.slice();
+    out[i] = `${full.slice(0, end)}…`;
+    kept.set(i, end);
+  };
+  cells.forEach((c, i) => {
+    if (typeof c === "string" && c.length > PREVIEW_CHARS) shorten(i, PREVIEW_CHARS);
+  });
+  const chars = out.reduce((sum, c) => sum + (typeof c === "string" ? c.length : 0), 0);
+  if (chars * 6 + cells.length * 27 > ROW_BYTE_BUDGET) {
+    const size = (c) => (typeof c === "string" ? jsonBytes(c) : 24) + 1;
+    const sizes = out.map(size);
+    let total = sizes.reduce((sum, n) => sum + n, 0);
+    while (total > ROW_BYTE_BUDGET) {
+      let largest = -1;
+      out.forEach((c, i) => {
+        if (typeof c === "string" && (largest === -1 || sizes[i] > sizes[largest])) largest = i;
+      });
+      if (largest === -1) break;
+      const keep = Math.floor((kept.get(largest) ?? out[largest].length) / 2);
+      shorten(largest, keep);
+      const after = size(out[largest]);
+      total += after - sizes[largest];
+      sizes[largest] = after;
+      if (keep === 0) break;
+    }
+  }
+  const columns = [.../* @__PURE__ */ new Set([...kept.keys(), ...stored?.keys() ?? []])].sort((a, b) => a - b);
+  return {
+    cells: out,
+    cut: columns.map((i) => {
+      const text2 = cells[i];
+      const whole = stored?.get(i);
+      return whole === void 0 ? [i, text2.length] : [i, whole, text2.length - truncationMarker(whole).length];
+    })
+  };
 }
 
 // worker/main.ts
@@ -71028,9 +71155,9 @@ var activate = async (orca) => {
   handle("query.rows", async ({ runId, result, offset, limit }) => runs.rows(runId, result, offset, Math.min(limit, 2e3)));
   handle(
     "export.prepare",
-    async ({ runId, result, format, tableName, headers }) => runs.prepareExport(runId, result, format, tableName, headers !== false)
+    async ({ runId, result, format, tableName, headers, selection, raw }) => runs.prepareExport(runId, result, format, tableName, headers !== false, selection, raw === true)
   );
-  handle("export.chunk", async ({ exportId, index }) => ({ text: runs.exportChunk(exportId, index) }));
+  handle("export.chunk", async ({ exportId, offset }) => runs.exportChunk(exportId, offset));
   shutdown = () => {
     runs.dispose();
     meta.dispose();

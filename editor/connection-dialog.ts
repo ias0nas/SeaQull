@@ -3,6 +3,7 @@
 // password to Orca's encrypted secrets.
 import type { ConnectionConfig, ConnectionInput } from '../src/protocol.ts'
 import { normalizeColor, PALETTE } from '../src/shared/colors.ts'
+import { request } from './request.ts'
 import { errorText } from './util.ts'
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
@@ -150,7 +151,7 @@ ui.test.addEventListener('click', async () => {
   setBusy(true)
   setStatus('Connecting…')
   try {
-    const result = await orca.plugin.request('connections.test', toInput(), { timeoutMs: 90_000 })
+    const result = await request('connections.test', toInput(), { timeoutMs: 90_000 })
     if (mine !== session) return
     if (result.ok) setStatus(`Connected as ${result.login} to SQL Server ${result.serverVersion} in ${result.ms} ms`, 'success')
     else setStatus(result.error, 'danger')
@@ -169,7 +170,7 @@ ui.dialog.addEventListener('submit', async (event) => {
   setBusy(true)
   let saved: ConnectionConfig
   try {
-    saved = await orca.plugin.request('connections.save', toInput())
+    saved = await request('connections.save', toInput())
   } catch (err) {
     if (mine === session) setStatus(errorText(err), 'danger')
     return

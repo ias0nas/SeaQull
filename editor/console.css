@@ -257,6 +257,10 @@ dialog h2 { margin: 0 0 4px; font-size: 15px; }
 .dialog-buttons { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .dialog-buttons .spacer { flex: 1; }
 #confirm-dialog p { margin: 0 0 8px; }
+#ready-dialog { width: min(380px, calc(100vw - 32px)); }
+#ready-dialog p { margin: 0 0 8px; }
+.ready-heading { display: flex; align-items: center; gap: 6px; }
+.info { display: inline-flex; color: var(--muted); cursor: help; border-radius: 50%; }
 .danger-button { background: var(--orca-destructive); color: var(--orca-destructive-foreground, white); border-color: transparent; }
 
 .tooltip {

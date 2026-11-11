@@ -42,7 +42,6 @@
             <select id="format" title="Format for Copy, Save… and the grid's Copy as…"></select>
             <button id="copy-result" class="with-icon"></button>
             <button id="save-result" class="with-icon" title="Save the whole result to a file in this format (Orca's save dialog)"></button>
-            <button id="ready" class="primary" hidden></button>
           </div>
           <div id="grid" class="grid" hidden></div>
           <ol id="messages" class="messages" hidden></ol>
@@ -87,6 +86,17 @@
           <button id="cd-save" type="submit" class="primary" title="Save the connection (Enter)">Save</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="ready-dialog" aria-labelledby="ready-title">
+      <h2 class="ready-heading"><span id="ready-title"></span><span id="ready-why" class="info"></span></h2>
+      <p id="ready-size" class="note"></p>
+      <p id="ready-text"></p>
+      <div class="dialog-buttons">
+        <span class="spacer"></span>
+        <button id="ready-cancel" type="button" title="Esc">Cancel</button>
+        <button id="ready-ok" type="button" class="primary"></button>
+      </div>
     </dialog>
 
     <dialog id="confirm-dialog">

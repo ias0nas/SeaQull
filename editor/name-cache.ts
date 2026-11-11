@@ -4,6 +4,7 @@
 // changed them.
 import type { ObjectColumns, ObjectName } from '../src/protocol.ts'
 import { nameIndex, objectKey, settledColumns, type NameIndex } from '../src/shared/sql-names.ts'
+import { request } from './request.ts'
 
 /** After a failure (no access, a failed login), ask again only after this: completion asks on
  *  every keystroke, and repeated failed logins could lock an account. */
@@ -30,7 +31,7 @@ export function namesFor(connectionId: string, database: string): Promise<NameIn
   const cached = cache.get(key)
   if (cached && (cached.failedAt === undefined || recent(cached.failedAt))) return cached.names
   const entry: Entry = {
-    names: orca.plugin.request('completion.names', { connectionId, database }, { timeoutMs: 60_000 }).then(nameIndex, () => {
+    names: request('completion.names', { connectionId, database }, { timeoutMs: 60_000 }).then(nameIndex, () => {
       entry.failedAt = Date.now()
       return null
     }),
@@ -50,7 +51,7 @@ export async function columnsFor(connectionId: string, database: string, objects
   if (!entry) return found
   const missing = objects.filter((o) => !entry.columns.has(objectKey(o))).slice(0, MAX_OBJECTS)
   if (missing.length > 0 && !recent(entry.columnsFailedAt)) {
-    const request = orca.plugin.request('completion.columns', { connectionId, database, objects: missing }, { timeoutMs: 60_000 }).then(
+    const asked = request('completion.columns', { connectionId, database, objects: missing }, { timeoutMs: 60_000 }).then(
       (answer) => settledColumns(missing, answer),
       () => {
         entry.columnsFailedAt = Date.now()
@@ -59,7 +60,7 @@ export async function columnsFor(connectionId: string, database: string, objects
     )
     for (const o of missing) {
       const key = objectKey(o)
-      const columns: Promise<ObjectColumns | null> = request.then((settled) => {
+      const columns: Promise<ObjectColumns | null> = asked.then((settled) => {
         if (settled?.has(key)) return settled.get(key)!
         // Not sent (the answer was full) or the request failed: ask again next time.
         if (entry.columns.get(key) === columns) entry.columns.delete(key)

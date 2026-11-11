@@ -8,15 +8,16 @@
 // result sets, rows, runs and the worker as a whole all have budgets below, measured in bytes.
 import { randomUUID } from 'node:crypto'
 import type { Connection } from 'tedious'
-import type { Cell, ExportFormat, ResultSummary, RunMessage, RunState, RunStatus } from '../src/protocol.ts'
-import { exportParts, formatInfo, type ExportParts } from '../src/shared/export.ts'
+import type { Cell, CellRange, ExportFormat, ResultSummary, RunMessage, RunState, RunStatus, ValueCut } from '../src/protocol.ts'
+import { cellText, exportParts, formatInfo, type ExportParts } from '../src/shared/export.ts'
+import { jsonFit } from '../src/shared/json-bytes.ts'
 import { splitBatches } from '../src/shared/sql-script.ts'
-import { isClosed, queryRows, runBatch, truncateText } from './mssql.ts'
+import { isClosed, MAX_CELL_CHARS, queryRows, runBatch, truncateText, truncationMarker } from './mssql.ts'
 
 /** Stay well under Orca's 1 MiB answer cap (measured as UTF-8 JSON). */
 const PAGE_BYTE_BUDGET = 700_000
-/** Characters per export chunk: JSON escaping can make a character 6 bytes (`\u0001`). */
-const EXPORT_CHUNK_CHARS = 150_000
+/** An export chunk's text, as UTF-8 JSON, stays under this (Orca's answer cap is 1 MiB). */
+export const EXPORT_CHUNK_BYTES = 900_000
 const SESSION_IDLE_MS = 30 * 60_000
 const RUN_TTL_MS = 60 * 60_000
 const EXPORT_TTL_MS = 10 * 60_000
@@ -36,16 +37,22 @@ const MAX_MESSAGE_CHARS = 4000
 const INFO_BUDGET = { count: 900, bytes: 300_000 }
 const ERROR_BUDGET = { count: 100, bytes: 150_000 }
 const RESULT_BUDGET = { count: 500, bytes: 200_000 }
-/** One row must fit in one page of query.rows. */
+/** query.rows sends the start of longer values (rows are kept whole); a row of many columns is cut
+ *  further to fit this. */
+export const PREVIEW_CHARS = 500
 const ROW_BYTE_BUDGET = 600_000
 /** Rows kept in memory: per run, and for all kept runs of all consoles together. */
 const RUN_BYTE_BUDGET = 100_000_000
 const WORKER_BYTE_BUDGET = 400_000_000
+/** One row may take this much of a run's budget; its longest values are cut to fit. */
+export const MAX_ROW_BYTES = RUN_BYTE_BUDGET / 2
 /** Bytes counted per row and per cell on top of their text (arrays and values cost memory too). */
 const ROW_OVERHEAD = 64
 const CELL_OVERHEAD = 16
 
-type ResultData = { summary: ResultSummary; rows: Cell[][] }
+/** `cut`: by row, then column, the whole length of each value kept cut short (to MAX_CELL_CHARS, or
+ *  to fit MAX_ROW_BYTES). */
+type ResultData = { summary: ResultSummary; rows: Cell[][]; cut?: Map<number, Map<number, number>> }
 
 type Run = {
   id: string
@@ -113,7 +120,16 @@ type Session = {
  * An export, formatted a chunk at a time: the text is the pieces head, row 0 … row n-1, tail, and
  * `ends[i]` is where piece i ends in it. Only these offsets are kept (8 bytes a row), not the text.
  */
-type PreparedExport = { runId: string; parts: ExportParts; rows: Cell[][]; ends: Float64Array; createdAt: number; bytes: number }
+type PreparedExport = {
+  runId: string
+  parts: ExportParts
+  rows: Cell[][]
+  ends: Float64Array
+  createdAt: number
+  bytes: number
+  /** A row whose text the last chunk ended inside (a long value spans many chunks); in `bytes`. */
+  last?: { piece: number; text: string }
+}
 
 /** Where a run goes: the session key parts, how to open a connection there, and how to name it to
  *  the user (the status-bar item's tooltip). */
@@ -308,6 +324,7 @@ export class RunManager {
     const dropped = { info: 0, error: 0, results: 0 }
     let sawError = false
     let memoryLimit = ''
+    let overCap = 0
     /** Keeps a message if its kind's budget allows; `always` for the run's final error. */
     const note = (message: RunMessage, always = false) => {
       if (message.kind === 'error') sawError = true
@@ -368,13 +385,15 @@ export class RunManager {
                 current = { summary, rows: [] }
                 run.results.push(current)
               },
-              onRow: (cells) => {
+              onRow: (cells, capped) => {
                 if (!current) return true
                 if (current.rows.length >= maxRows) {
                   current.summary.truncated = true
                   return false
                 }
-                const bytes = capRow(cells) + ROW_OVERHEAD + cells.length * CELL_OVERHEAD
+                const cut = new Map(capped)
+                fitRow(cells, cut)
+                const bytes = rowBytes(cells) + ROW_OVERHEAD + cells.length * CELL_OVERHEAD
                 if (run.bytes + bytes > RUN_BYTE_BUDGET) memoryLimit = 'this run'
                 else if (this.keptBytes + bytes > WORKER_BYTE_BUDGET) memoryLimit = 'all open results together'
                 if (memoryLimit) {
@@ -385,6 +404,10 @@ export class RunManager {
                 this.keptBytes += bytes
                 current.rows.push(cells)
                 current.summary.rowCount = current.rows.length
+                if (cut.size > 0) {
+                  ;(current.cut ??= new Map()).set(current.rows.length - 1, cut)
+                  overCap += cut.size
+                }
                 return true
               },
               onStatementDone: (rowCount, hadResult) => {
@@ -424,6 +447,13 @@ export class RunManager {
     // What was left out goes in after the budgets, so it always shows.
     if (dropped.results > 0) {
       run.messages.push({ kind: 'info', text: `… ${dropped.results} more result sets not kept (SeaQull keeps at most ${RESULT_BUDGET.count} per run).` })
+    }
+    if (overCap > 0) {
+      const values = overCap === 1 ? '1 value was' : `${overCap.toLocaleString('en-US')} values were`
+      run.messages.push({
+        kind: 'info',
+        text: `${values} cut short: SeaQull keeps up to ${MAX_CELL_CHARS.toLocaleString('en-US')} characters of a value, and about ${(MAX_ROW_BYTES / 2).toLocaleString('en-US')} of a row. The grid, copies and exports all have the cut values.`
+      })
     }
     if (dropped.error > 0) run.messages.push({ kind: 'error', text: `… ${dropped.error} more errors not shown.` })
     if (dropped.info > 0) run.messages.push({ kind: 'info', text: `… ${dropped.info} more messages not shown.` })
@@ -489,26 +519,32 @@ export class RunManager {
     if (run.state === 'running') run.abort.abort()
   }
 
-  rows(runId: string, result: number, offset: number, limit: number): { offset: number; rows: Cell[][] } {
+  /** Rows from `offset`, as many as fit in one answer, with long values cut short (see ValueCut). */
+  rows(runId: string, result: number, offset: number, limit: number): { offset: number; rows: Cell[][]; cut: ValueCut[] } {
     const data = this.result(runId, result)
     if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1) throw invalid('offset and limit must be whole numbers ≥ 0 and ≥ 1')
     const rows: Cell[][] = []
+    const cut: ValueCut[] = []
     let bytes = 0
     for (let i = offset; i < Math.min(offset + limit, data.rows.length); i++) {
-      const size = jsonBytes(data.rows[i])
+      const preview = previewRow(data.rows[i], data.cut?.get(i))
+      const entries = preview.cut.map((entry): ValueCut => [rows.length, ...entry])
+      const size = jsonBytes(preview.cells) + entries.reduce((sum, entry) => sum + jsonBytes(entry) + 1, 0)
       if (rows.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break
-      rows.push(data.rows[i])
+      cut.push(...entries)
+      rows.push(preview.cells)
       bytes += size
     }
-    return { offset, rows }
+    return { offset, rows, cut }
   }
 
   /**
    * Gets an export ready: works out where each row's text starts, a few thousand rows at a time so
    * other requests get through, but keeps no text; export.chunk formats its stretch on demand. One
    * export per run (a new one replaces the last), counted in the worker's memory budget.
+   * `selection`: only those rows and columns (a grid selection); `raw`: one selected cell's text.
    */
-  async prepareExport(runId: string, result: number, format: ExportFormat, tableName?: string, headers = true) {
+  async prepareExport(runId: string, result: number, format: ExportFormat, tableName?: string, headers = true, selection?: CellRange, raw = false) {
     let info: ReturnType<typeof formatInfo>
     try {
       info = formatInfo(format)
@@ -516,13 +552,25 @@ export class RunManager {
       throw invalid((err as Error).message)
     }
     const data = this.result(runId, result)
+    const range = selection ?? { r0: 0, r1: data.rows.length - 1, c0: 0, c1: data.summary.columns.length - 1 }
+    if (selection !== undefined && !withinResult(selection, data.rows.length, data.summary.columns.length)) {
+      throw invalid('selection must be rows r0…r1 and columns c0…c1 of the result')
+    }
+    if (raw && (!selection || range.r0 !== range.r1 || range.c0 !== range.c1)) throw invalid('raw needs a selection of one cell')
     for (const [id, prepared] of this.exports) if (prepared.runId === runId) this.dropExport(id)
-    const rows = data.rows.slice() // the rows as they are now (a run still going adds more)
+    const rows = data.rows.slice(range.r0, range.r1 + 1) // the rows as they are now (a run still going adds more)
     const bytes = (rows.length + 2) * 8 + rows.length * 8
     if (this.keptBytes + bytes > WORKER_BYTE_BUDGET) {
       throw new Error('Not enough of SeaQull\'s memory left to export this result: close tabs whose results you no longer need, then try again.')
     }
-    const parts = exportParts(format, { columns: data.summary.columns, rows, tableName, headers })
+    const allColumns = range.c0 === 0 && range.c1 === data.summary.columns.length - 1
+    const columns = data.summary.columns.slice(range.c0, range.c1 + 1)
+    const formatted = exportParts(format, { columns, rows, tableName, headers })
+    const parts: ExportParts = raw
+      ? { head: '', row: (cells) => cellText(cells[range.c0]), tail: '' }
+      : allColumns
+        ? formatted
+        : { ...formatted, row: (cells, i) => formatted.row(cells.slice(range.c0, range.c1 + 1), i) }
     const ends = new Float64Array(rows.length + 2)
     let end = parts.head.length
     ends[0] = end
@@ -542,37 +590,51 @@ export class RunManager {
     this.keptBytes += bytes
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
     const base = tableName?.replace(/[\[\]]/g, '').replace(/[^\w.-]+/g, '_') || 'result'
-    const chunks = Math.max(1, Math.ceil(length / EXPORT_CHUNK_CHARS))
-    return { exportId, chunks, length, fileName: `${base}-${stamp}.${info.extension}`, mimeType: info.mimeType }
+    return { exportId, length, fileName: `${base}-${stamp}.${info.extension}`, mimeType: info.mimeType }
   }
 
-  /** Characters [index × EXPORT_CHUNK_CHARS, + EXPORT_CHUNK_CHARS) of the export, formatted now. */
-  exportChunk(exportId: string, index: number): string {
+  /** The export's text from character `offset`, as much as fits in EXPORT_CHUNK_BYTES, formatted
+   *  now; `next` is where the following chunk starts (null: this was the last). */
+  exportChunk(exportId: string, offset: number): { text: string; next: number | null } {
     const prepared = this.exports.get(exportId)
-    const { ends } = prepared ?? { ends: new Float64Array(0) }
-    const length = ends[ends.length - 1] ?? 0
-    const chunks = Math.max(1, Math.ceil(length / EXPORT_CHUNK_CHARS))
-    if (!prepared || !Number.isInteger(index) || index < 0 || index >= chunks) throw invalid('Export expired: export again.')
-    const { parts, rows } = prepared
-    const from = index * EXPORT_CHUNK_CHARS
-    const to = Math.min(from + EXPORT_CHUNK_CHARS, length)
-    // The first piece ending after `from` (piece 0 the head, 1…n the rows, n + 1 the tail).
+    const length = prepared?.ends[prepared.ends.length - 1] ?? 0
+    if (!prepared || !Number.isInteger(offset) || offset < 0 || offset > length) throw invalid('Export expired: export again.')
+    const { ends, parts, rows } = prepared
+    // The first piece ending after `offset` (piece 0 the head, 1…n the rows, n + 1 the tail).
     let lo = 0
     let hi = ends.length - 1
     while (lo < hi) {
       const mid = (lo + hi) >> 1
-      if (ends[mid] > from) hi = mid
+      if (ends[mid] > offset) hi = mid
       else lo = mid + 1
     }
     let text = ''
-    for (let piece = lo; piece < ends.length; piece++) {
+    let at = offset
+    let budget = EXPORT_CHUNK_BYTES
+    for (let piece = lo; piece < ends.length && at < length; piece++) {
       const start = piece === 0 ? 0 : ends[piece - 1]
-      if (start >= to) break
-      const whole = piece === 0 ? parts.head : piece === ends.length - 1 ? parts.tail : parts.row(rows[piece - 1], piece - 1)
-      text += whole.slice(Math.max(0, from - start), to - start)
+      if (ends[piece] <= at) continue
+      const isRow = piece > 0 && piece < ends.length - 1
+      const whole =
+        piece === 0 ? parts.head : !isRow ? parts.tail : prepared.last?.piece === piece ? prepared.last.text : parts.row(rows[piece - 1], piece - 1)
+      const [end, bytes] = jsonFit(whole, at - start, budget)
+      text += whole.slice(at - start, end)
+      budget -= bytes
+      at = start + end
+      if (isRow) this.keepPiece(prepared, end < whole.length ? { piece, text: whole } : undefined)
+      if (end < whole.length) break
     }
-    if (index === chunks - 1) setTimeout(() => this.dropExport(exportId), 60_000).unref?.()
-    return text
+    const next = at < length ? at : null
+    if (next === null) setTimeout(() => this.dropExport(exportId), 60_000).unref?.()
+    return { text, next }
+  }
+
+  private keepPiece(prepared: PreparedExport, last: PreparedExport['last']): void {
+    if (prepared.last === last || (prepared.last && last && prepared.last.piece === last.piece)) return
+    const change = (last?.text.length ?? 0) * 2 - (prepared.last?.text.length ?? 0) * 2
+    prepared.last = last
+    prepared.bytes += change
+    this.keptBytes += change
   }
 
   private dropExport(exportId: string): void {
@@ -713,33 +775,91 @@ export async function probeTransaction(
   }
 }
 
+const withinResult = (range: unknown, rows: number, columns: number): range is CellRange => {
+  const { r0, r1, c0, c1 } = (range ?? {}) as Record<string, unknown>
+  const index = (n: unknown, size: number): n is number => Number.isInteger(n) && (n as number) >= 0 && (n as number) < size
+  return index(r0, rows) && index(r1, rows) && index(c0, columns) && index(c1, columns) && r0 <= r1 && c0 <= c1
+}
+
 const connectionLost = () =>
   new Error('Connection lost (the server closed it, or the network dropped): the rest of the script did not run. Run again to reconnect.')
 
-/**
- * Shortens a row's long text until the whole row, as UTF-8 JSON, fits ROW_BYTE_BUDGET (it must fit
- * in one page); returns that size. Cells are already capped one by one in toCell, but a row of
- * several big cells, or of characters JSON escapes (`\u0000` is 6 bytes), can still be too large.
- */
-export function capRow(cells: Cell[]): number {
-  // Fast path: no character takes more than 6 bytes in JSON, so most rows need no measuring.
-  // The size returned then estimates memory (strings are 2 bytes a character) rather than JSON.
-  const chars = cells.reduce<number>((sum, c) => sum + (typeof c === 'string' ? c.length : 0), 0)
-  if (chars * 6 + cells.length * 8 <= ROW_BYTE_BUDGET) return chars * 2 + cells.length * 8
-  const size = (c: Cell) => (typeof c === 'string' ? jsonBytes(c) : 8)
-  let total = cells.reduce<number>((sum, c) => sum + size(c), 0)
-  while (total > ROW_BYTE_BUDGET) {
-    // Halve the largest text cell; a handful of rounds always gets there.
+/** Memory a row's values take, roughly: strings are 2 bytes a character. */
+export function rowBytes(cells: Cell[]): number {
+  let chars = 0
+  for (const c of cells) if (typeof c === 'string') chars += c.length
+  return chars * 2 + cells.length * 8
+}
+
+/** Cuts a row's longest text values in half, in place, until the row takes at most `maxBytes`;
+ *  `cut` gets the whole length of each value cut. */
+export function fitRow(cells: Cell[], cut: Map<number, number>, maxBytes = MAX_ROW_BYTES): void {
+  let bytes = rowBytes(cells)
+  while (bytes > maxBytes) {
     let largest = -1
     cells.forEach((c, i) => {
-      if (typeof c === 'string' && (largest === -1 || size(c) > size(cells[largest]))) largest = i
+      if (typeof c === 'string' && (largest === -1 || c.length > (cells[largest] as string).length)) largest = i
     })
-    if (largest === -1) break
-    const before = cells[largest] as string
-    const keep = Math.floor(before.replace(/… \[truncated, \d+ chars\]$/, '').length / 2)
-    cells[largest] = truncateText(before, keep)
-    total += size(cells[largest]) - size(before)
-    if (keep === 0) break
+    const text = largest === -1 ? '' : (cells[largest] as string)
+    if (text.length < 1000) return
+    const whole = cut.get(largest) ?? text.length
+    cells[largest] = truncateText(text, Math.floor(text.length / 2), whole)
+    cut.set(largest, whole)
+    bytes += ((cells[largest] as string).length - text.length) * 2
   }
-  return total
+}
+
+/**
+ * A row as query.rows sends it: text longer than PREVIEW_CHARS cut to that and ended with `…`, then
+ * shortened further while the row, as UTF-8 JSON, is over ROW_BYTE_BUDGET (a page must stay under
+ * Orca's 1 MiB answer cap). `stored`: the whole lengths of values the stored row has cut short.
+ * `cut`: [column, whole length, characters kept when the stored value is cut short] of each value
+ * not sent whole.
+ */
+export function previewRow(cells: Cell[], stored?: Map<number, number>): { cells: Cell[]; cut: [number, number, number?][] } {
+  let out = cells
+  const kept = new Map<number, number>()
+  const shorten = (i: number, keep: number) => {
+    const full = cells[i] as string
+    // Not between the halves of a surrogate pair.
+    const high = full.charCodeAt(keep - 1)
+    const end = high >= 0xd800 && high <= 0xdbff ? keep - 1 : keep
+    if (out === cells) out = cells.slice()
+    out[i] = `${full.slice(0, end)}…`
+    kept.set(i, end)
+  }
+  cells.forEach((c, i) => {
+    if (typeof c === 'string' && c.length > PREVIEW_CHARS) shorten(i, PREVIEW_CHARS)
+  })
+  // No character takes more than 6 bytes in JSON, nor any other value 24 (with its comma, quotes),
+  // so most rows need no measuring.
+  const chars = out.reduce<number>((sum, c) => sum + (typeof c === 'string' ? c.length : 0), 0)
+  if (chars * 6 + cells.length * 27 > ROW_BYTE_BUDGET) {
+    const size = (c: Cell) => (typeof c === 'string' ? jsonBytes(c) : 24) + 1
+    const sizes = out.map(size)
+    let total = sizes.reduce((sum, n) => sum + n, 0)
+    while (total > ROW_BYTE_BUDGET) {
+      // Halve the largest text cell; a handful of rounds always gets there.
+      let largest = -1
+      out.forEach((c, i) => {
+        if (typeof c === 'string' && (largest === -1 || sizes[i] > sizes[largest])) largest = i
+      })
+      if (largest === -1) break
+      const keep = Math.floor((kept.get(largest) ?? (out[largest] as string).length) / 2)
+      shorten(largest, keep)
+      const after = size(out[largest])
+      total += after - sizes[largest]
+      sizes[largest] = after
+      if (keep === 0) break
+    }
+  }
+  const columns = [...new Set([...kept.keys(), ...(stored?.keys() ?? [])])].sort((a, b) => a - b)
+  return {
+    cells: out,
+    cut: columns.map((i) => {
+      const text = cells[i] as string
+      const whole = stored?.get(i)
+      return whole === undefined ? [i, text.length] : [i, whole, text.length - truncationMarker(whole).length]
+    })
+  }
 }

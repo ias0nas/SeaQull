@@ -6,9 +6,9 @@ import { after, before, test } from 'node:test'
 import type { Connection } from 'tedious'
 import { completionColumns } from '../worker/completion.ts'
 import { columnNodes, databaseNodes, decodeKey, encodeKey, folderNodes, listDatabases, objectNodes, schemaNodes } from '../worker/metadata.ts'
-import { openConnection, queryRows, type Credentials, type Endpoint } from '../worker/mssql.ts'
+import { MAX_CELL_CHARS, openConnection, queryRows, type Credentials, type Endpoint } from '../worker/mssql.ts'
 import { exportResult } from '../src/shared/export.ts'
-import { newSessionText, probeTransaction, RunManager, type SessionMemory, type Target } from '../worker/runs.ts'
+import { MAX_ROW_BYTES, newSessionText, probeTransaction, RunManager, type SessionMemory, type Target } from '../worker/runs.ts'
 
 const endpoint: Endpoint = { server: 'localhost', port: Number(process.env.MSSQL_PORT ?? 1433), database: 'AdventureWorks2022', encrypt: true, trustServerCertificate: true }
 const credentials: Credentials = { kind: 'sql', user: 'sa', password: process.env.MSSQL_SA_PASSWORD ?? '' }
@@ -213,8 +213,7 @@ test('run: decimal, numeric, money, smallmoney and datetimeoffset values are exa
   )
 
   const exported = async (format: 'csv' | 'json' | 'sql') => {
-    const prepared = await runs.prepareExport(runId, 0, format, '[dbo].[T]')
-    return runs.exportChunk(prepared.exportId, 0)
+    return exportText(await runs.prepareExport(runId, 0, format, '[dbo].[T]'))
   }
   const csv = (await exported('csv')).split('\r\n')[1].split(',')
   assert.deepEqual(csv.slice(0, 5), expected.slice(0, 5))
@@ -238,16 +237,88 @@ test('run: exact decimals also in rows sent as NBCROW (many NULLs)', async () =>
   assert.deepEqual(runs.rows(runId, 0, 0, 1).rows[0].slice(30), ['12345678901234567890.123456789', '1.10', '2026-01-02 03:04:05.1234567 +05:30'])
 })
 
-test('run: huge binary and text values are cut so every row fits in one page', async () => {
+/** An export's chunks, fetched one after the other as the console does. */
+function exportChunks(prepared: { exportId: string }): string[] {
+  const chunks: string[] = []
+  for (let offset: number | null = 0; offset !== null; ) {
+    const chunk = runs.exportChunk(prepared.exportId, offset)
+    chunks.push(chunk.text)
+    offset = chunk.next
+  }
+  return chunks
+}
+
+const exportText = (prepared: { exportId: string }) => exportChunks(prepared).join('')
+
+test('run: long binary and text are kept whole; pages carry a short preview and say what was cut', async () => {
   const { runId } = await runToEnd(
     'tab-big',
     `SELECT CAST(REPLICATE(CAST(0x41 AS varbinary(max)), 400000) AS varbinary(max)) AS bin,
-            REPLICATE(CAST(N'x' AS nvarchar(max)), 300000) AS a, REPLICATE(CAST(N'y' AS nvarchar(max)), 300000) AS b`
+            REPLICATE(CAST(N'x' AS nvarchar(max)), 300000) AS a, REPLICATE(CAST(N'y' AS nvarchar(max)), 300000) AS b, N'short' AS s`
   )
-  const [row] = runs.rows(runId, 0, 0, 1).rows
-  assert.ok(Buffer.byteLength(JSON.stringify(row)) < 1_000_000, 'row too large for one page')
-  assert.match(String(row[0]), /^0x4141[^…]*… \[truncated, 800002 chars\]$/)
-  assert.match(String(row[1]), /… \[truncated, 300000 chars\]$/)
+  const bin = `0x${'41'.repeat(400_000)}`
+  const page = runs.rows(runId, 0, 0, 1)
+  assert.deepEqual(page.rows[0], [`0x${'41'.repeat(249)}…`, `${'x'.repeat(500)}…`, `${'y'.repeat(500)}…`, 'short'])
+  assert.deepEqual(page.cut, [[0, 0, bin.length], [0, 1, 300_000], [0, 2, 300_000]])
+
+  const [json] = JSON.parse(exportText(await runs.prepareExport(runId, 0, 'json')))
+  assert.deepEqual(json, { bin, a: 'x'.repeat(300_000), b: 'y'.repeat(300_000), s: 'short' })
+  // A selection, as the grid's copy asks for it: formatted from the whole values.
+  const tsv = exportText(await runs.prepareExport(runId, 0, 'tsv', undefined, false, { r0: 0, r1: 0, c0: 0, c1: 1 }))
+  assert.equal(tsv, `${bin}\t${'x'.repeat(300_000)}\r\n`)
+  // One cell, raw (⌘C on a single cell).
+  assert.equal(exportText(await runs.prepareExport(runId, 0, 'tsv', undefined, true, { r0: 0, r1: 0, c0: 0, c1: 0 }, true)), bin)
+  assert.equal(exportText(await runs.prepareExport(runId, 0, 'tsv', undefined, true, { r0: 0, r1: 0, c0: 3, c1: 3 }, true)), 'short')
+  await assert.rejects(runs.prepareExport(runId, 0, 'csv', undefined, true, { r0: 0, r1: 1, c0: 0, c1: 0 }), /selection/)
+  await assert.rejects(runs.prepareExport(runId, 0, 'csv', undefined, true, { r0: 0, r1: 0, c0: 0, c1: 1 }, true), /one cell/)
+})
+
+test('run: a value over the cell limit is kept cut to it, and the run says so', async () => {
+  const { runId, status } = await runToEnd('tab-over-cap', `SELECT REPLICATE(CAST(N'z' AS nvarchar(max)), ${MAX_CELL_CHARS + 10}) AS z`)
+  assert.ok(status.messages.some((m) => m.text.startsWith('1 value was cut short')), JSON.stringify(status.messages))
+  assert.deepEqual(runs.rows(runId, 0, 0, 1).cut, [[0, 0, MAX_CELL_CHARS + 10, MAX_CELL_CHARS]])
+  const raw = exportText(await runs.prepareExport(runId, 0, 'tsv', undefined, true, { r0: 0, r1: 0, c0: 0, c1: 0 }, true))
+  assert.ok(raw.startsWith('z'.repeat(1000)))
+  assert.match(raw.slice(-100), new RegExp(`z… \\[truncated, ${MAX_CELL_CHARS + 10} chars\\]$`))
+  runs.closeOwner('tab-over-cap')
+})
+
+test('run: a row too large to keep whole is kept with its longest values cut, and the run says so', async () => {
+  const columns = ['a', 'b', 'c'].map((c) => `REPLICATE(CAST(N'${c}' AS nvarchar(max)), ${MAX_CELL_CHARS}) AS ${c}`)
+  const { runId, status } = await runToEnd('tab-huge-row', `SELECT ${columns.join(', ')}, 1 AS n`)
+  assert.equal(status.state, 'done', JSON.stringify(status.messages))
+  assert.equal(status.results[0].rowCount, 1)
+  assert.equal(status.results[0].truncated, false)
+  assert.ok(status.messages.some((m) => m.text.startsWith('3 values were cut short')), JSON.stringify(status.messages))
+  assert.ok(!status.messages.some((m) => m.text.includes('memory budget')), JSON.stringify(status.messages))
+  const { rows, cut } = runs.rows(runId, 0, 0, 1)
+  assert.equal(rows[0][3], 1)
+  assert.deepEqual(cut.map(([row, column, length]) => [row, column, length]), [[0, 0, MAX_CELL_CHARS], [0, 1, MAX_CELL_CHARS], [0, 2, MAX_CELL_CHARS]])
+  const kept = cut.map(([, , , k]) => k ?? 0)
+  assert.ok(kept.every((k) => k > 1_000_000 && k < MAX_CELL_CHARS), JSON.stringify(kept))
+  assert.ok(kept.reduce((sum, k) => sum + k, 0) * 2 <= MAX_ROW_BYTES)
+  const raw = exportText(await runs.prepareExport(runId, 0, 'tsv', undefined, true, { r0: 0, r1: 0, c0: 0, c1: 0 }, true))
+  assert.equal(raw, `${'a'.repeat(kept[0])}… [truncated, ${MAX_CELL_CHARS} chars]`)
+  runs.closeOwner('tab-huge-row')
+})
+
+test('rows: a page of many long values stays under the answer budget and lists every cut value; a large selection exports whole', async () => {
+  const { runId } = await runToEnd(
+    'tab-many-long',
+    `SELECT ${['a', 'b', 'c', 'd', 'e', 'f'].map((c) => `REPLICATE(CAST(N'${c}' AS nvarchar(max)), 1000) AS ${c}`).join(', ')}, n
+       FROM (SELECT TOP (3000) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) AS n FROM sys.all_columns a CROSS JOIN sys.all_columns b) t ORDER BY n`
+  )
+  const page = runs.rows(runId, 0, 0, 2000)
+  assert.ok(page.rows.length > 100 && page.rows.length < 2000, `${page.rows.length} rows`)
+  assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 700_000, `page of ${Buffer.byteLength(JSON.stringify(page))} bytes`)
+  assert.equal(page.cut.length, page.rows.length * 6)
+  assert.deepEqual(page.cut.slice(0, 2), [[0, 0, 1000], [0, 1, 1000]])
+
+  const csv = exportText(await runs.prepareExport(runId, 0, 'csv', undefined, true, { r0: 0, r1: 2999, c0: 1, c1: 6 }))
+  const lines = csv.split('\r\n')
+  assert.equal(lines.length, 3002) // header, 3000 rows, the empty string after the last CRLF
+  assert.equal(lines[0], 'b,c,d,e,f,n')
+  assert.equal(lines[3000], `${['b', 'c', 'd', 'e', 'f'].map((c) => c.repeat(1000)).join(',')},3000`)
 })
 
 /** A target whose connection opens only when released, and that says when opening started. */
@@ -542,9 +613,7 @@ test('export: formatted a chunk at a time, the same text in every format; one ex
   const columns = runs.status(runId).results[0].columns
   for (const format of ['csv', 'tsv', 'json', 'jsonl', 'markdown', 'sql'] as const) {
     const prepared = await runs.prepareExport(runId, 0, format, '[dbo].[T]')
-    let text = ''
-    for (let i = 0; i < prepared.chunks; i++) text += runs.exportChunk(prepared.exportId, i)
-    assert.ok(prepared.chunks > 1, `${format}: ${prepared.chunks} chunk`)
+    const text = exportText(prepared)
     assert.equal(text.length, prepared.length)
     assert.equal(text, exportResult(format, { columns, rows: all, tableName: '[dbo].[T]' }), format)
   }
@@ -566,30 +635,56 @@ test('export: formatted a chunk at a time, the same text in every format; one ex
   const latest = await runs.prepareExport(runId, 0, 'csv')
   runs.exportChunk(latest.exportId, 0)
   await runToEnd('tab-lazy-export', 'SELECT 1') // a new run drops the old one, and its export
-  assert.throws(() => runs.exportChunk(latest.exportId, 1), /expired/)
+  assert.throws(() => runs.exportChunk(latest.exportId, 0), /expired/)
 })
 
-test('rows are paged under the size budget', async () => {
+test('rows: long values go as previews, so one page holds many of them', async () => {
   const { runId, status } = await runToEnd('tab6', "SELECT TOP 500 REPLICATE(N'x', 4000) AS wide FROM sys.all_objects")
   assert.equal(status.results[0].rowCount, 500)
   const page = runs.rows(runId, 0, 0, 2000)
-  assert.ok(page.rows.length > 0 && page.rows.length < 500, `got ${page.rows.length}`)
+  assert.equal(page.rows.length, 500)
+  assert.equal(page.cut.length, 500)
+  assert.equal(page.rows[499][0], `${'x'.repeat(500)}…`)
 })
 
 test('export: chunks reassemble to the full CSV', async () => {
   const { runId } = await runToEnd('tab7', 'SELECT SalesOrderID, CarrierTrackingNumber, rowguid FROM Sales.SalesOrderDetail')
   const prepared = await runs.prepareExport(runId, 0, 'csv', 'Sales.SalesOrderDetail')
   assert.match(prepared.fileName, /^Sales.SalesOrderDetail-\d{8}-\d{6}\.csv$/)
-  assert.ok(prepared.chunks > 1)
-  let text = ''
-  for (let i = 0; i < prepared.chunks; i++) text += runs.exportChunk(prepared.exportId, i)
+  const text = exportText(prepared)
   assert.equal(text.length, prepared.length)
   const lines = text.trimEnd().split('\r\n')
   assert.equal(lines[0], 'SalesOrderID,CarrierTrackingNumber,rowguid')
   assert.equal(lines.length, 10_001) // header + the row limit
 
   const bare = await runs.prepareExport(runId, 0, 'csv', undefined, false)
-  assert.match(runs.exportChunk(bare.exportId, 0), /^\d+,/) // no header row
+  assert.match(runs.exportChunk(bare.exportId, 0).text, /^\d+,/) // no header row
+})
+
+test('export: chunks are sized by their JSON bytes, whatever the text, and reassemble exactly', async () => {
+  const values: [string, string][] = [
+    ['abc ', "N'abc '"], // ASCII: one byte a character
+    ['{"k":"v"},', `N'{"k":"v"},'`], // quotes: two bytes each in JSON, doubled again in CSV
+    ['\u0001\\', "NCHAR(1) + N'\\'"], // a control character (six bytes) and a backslash (two)
+    ['€é', "N'€é'"], // three and two bytes
+    ['😀', 'NCHAR(55357) + NCHAR(56832)'] // a surrogate pair: four bytes, never split
+  ]
+  const repeat = 200_000
+  const sql = values.map(([, literal], i) => `SELECT ${i + 1} AS n, REPLICATE(CAST(${literal} AS nvarchar(max)), ${repeat}) AS v`).join(' UNION ALL ') + ' ORDER BY n'
+  const { runId, status } = await runToEnd('tab-chunk-bytes', sql)
+  assert.equal(status.state, 'done', JSON.stringify(status.messages))
+  const rows = values.map(([text], i) => [i + 1, text.repeat(repeat)])
+  for (const format of ['csv', 'json'] as const) {
+    const chunks = exportChunks(await runs.prepareExport(runId, 0, format))
+    const expected = exportResult(format, { columns: status.results[0].columns, rows })
+    assert.equal(chunks.join(''), expected, format)
+    const sizes = chunks.map((text) => Buffer.byteLength(JSON.stringify(text)) - 2)
+    assert.ok(sizes.every((bytes) => bytes <= 900_000), `${format}: a chunk of ${Math.max(...sizes)} bytes`)
+    // Each but the last full to within one character (6 bytes at most): no more requests than the bytes need.
+    assert.ok(sizes.slice(0, -1).every((bytes) => bytes > 900_000 - 6), `${format}: ${sizes.join(', ')}`)
+    for (const text of chunks) assert.ok(!/[\ud800-\udbff]$/.test(text), 'a chunk ends inside a surrogate pair')
+  }
+  runs.closeOwner('tab-chunk-bytes')
 })
 
 test('metadata helper rejects SQL errors', async () => {

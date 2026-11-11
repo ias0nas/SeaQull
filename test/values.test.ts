@@ -1,10 +1,11 @@
-// Value conversion (tedious → JSON cells) and the per-row size cap, without a database.
+// Value conversion (tedious → JSON cells) and the page previews of long values, without a database.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 // mssql.ts before tedious: it sets up tls first (worker/tls-ip.ts).
 import { baseTypeOf, isClosed, MAX_CELL_CHARS, toCell, truncateText } from '../worker/mssql.ts'
 import { Connection } from 'tedious'
-import { capRow } from '../worker/runs.ts'
+import type { Cell } from '../src/protocol.ts'
+import { fitRow, PREVIEW_CHARS, previewRow, rowBytes } from '../worker/runs.ts'
 import { checkExactValues, scaledText } from '../worker/exact-values.ts'
 import { ipServernameProblem, withoutIpServername } from '../worker/tls-ip.ts'
 import * as messageIoModule from 'tedious/lib/message-io.js'
@@ -48,41 +49,77 @@ test('numbers: exact bigints stay numbers, others become strings', () => {
   assert.equal(toCell(true, meta('BitN')), true)
 })
 
-test('binary and text over the cell limit are cut, with the original length', () => {
+test('long binary and text are kept whole up to the cell limit; over it, cut with the original length', () => {
   assert.equal(toCell(Buffer.from([1, 2, 255]), meta('VarBinary')), '0x0102FF')
-  const big = toCell(Buffer.alloc(MAX_CELL_CHARS), meta('VarBinary')) as string
-  assert.match(big, /… \[truncated, 400002 chars\]$/)
+  const cuts: number[] = []
+  const onCut = (length: number) => cuts.push(length)
+  const long = 'x'.repeat(1_000_000)
+  assert.equal(toCell(long, meta('NVarChar'), onCut), long)
+  assert.equal(toCell(Buffer.alloc(1_000_000, 0xab), meta('VarBinary'), onCut), `0x${'AB'.repeat(1_000_000)}`)
+  assert.deepEqual(cuts, [])
+  const big = toCell(Buffer.alloc(MAX_CELL_CHARS / 2), meta('VarBinary'), onCut) as string
+  assert.match(big, new RegExp(`… \\[truncated, ${MAX_CELL_CHARS + 2} chars\\]$`))
   assert.ok(big.length < MAX_CELL_CHARS + 50)
-  const text = toCell('x'.repeat(MAX_CELL_CHARS + 10), meta('NVarChar')) as string
+  const text = toCell('x'.repeat(MAX_CELL_CHARS + 10), meta('NVarChar'), onCut) as string
   assert.match(text, new RegExp(`… \\[truncated, ${MAX_CELL_CHARS + 10} chars\\]$`))
+  assert.deepEqual(cuts, [MAX_CELL_CHARS + 2, MAX_CELL_CHARS + 10])
 })
 
 test('cutting already-cut text keeps the original length in the marker', () => {
   const once = truncateText('y'.repeat(1000), 100)
   assert.equal(truncateText(once, 10), `${'y'.repeat(10)}… [truncated, 1000 chars]`)
+  assert.equal(truncateText('a😀b', 2), 'a… [truncated, 4 chars]')
+})
+
+test('a row too large to keep is fitted by halving its longest values, which are listed with their whole lengths', () => {
+  const cells: Cell[] = ['a'.repeat(10_000), 'b'.repeat(4000), 'c'.repeat(100), 5, null]
+  const cut = new Map<number, number>()
+  fitRow(cells, cut, 10_000)
+  assert.ok(rowBytes(cells) <= 10_000, `row still ${rowBytes(cells)} bytes`)
+  assert.deepEqual([...cut], [[0, 10_000], [1, 4000]])
+  assert.match(cells[0] as string, /^a+… \[truncated, 10000 chars\]$/)
+  assert.match(cells[1] as string, /^b+… \[truncated, 4000 chars\]$/)
+  assert.deepEqual(cells.slice(2), ['c'.repeat(100), 5, null])
+
+  const small: Cell[] = ['x'.repeat(100), 1]
+  fitRow(small, cut, 10_000)
+  assert.deepEqual(small, ['x'.repeat(100), 1])
+})
+
+test('a preview says how much of a value the worker kept, when it keeps only the start', () => {
+  const kept = truncateText('x'.repeat(30_000), 20_000)
+  const preview = previewRow([kept, 'y'.repeat(600)], new Map([[0, 30_000]]))
+  assert.deepEqual(preview.cut, [[0, 30_000, 20_000], [1, 600]])
 })
 
 const jsonSize = (row: unknown[]) => Buffer.byteLength(JSON.stringify(row))
 
-test('a row with several huge cells is cut to fit one page (measured as JSON bytes)', () => {
-  const row = ['a'.repeat(200_000), 'b'.repeat(200_000), 'c'.repeat(200_000), 7, null]
-  capRow(row)
-  assert.ok(jsonSize(row) <= 600_100, `row still ${jsonSize(row)} bytes`)
-  assert.equal(row[3], 7)
-  assert.match(String(row.find((c) => typeof c === 'string' && c.includes('truncated'))), /… \[truncated, 200000 chars\]$/)
+test('a page row sends the start of long text, ended with …, and which values were cut; the stored row stays whole', () => {
+  const row = ['a'.repeat(200_000), 'b'.repeat(PREVIEW_CHARS), `0x${'AB'.repeat(1000)}`, 7, null]
+  const stored = row.slice()
+  const preview = previewRow(row)
+  assert.deepEqual(row, stored)
+  assert.deepEqual(preview.cells, [`${'a'.repeat(PREVIEW_CHARS)}…`, row[1], `0x${'AB'.repeat(249)}…`, 7, null])
+  assert.deepEqual(preview.cut, [[0, 200_000], [2, 2002]])
 })
 
-test('characters JSON escapes count at their escaped size', () => {
-  const row = ['\u0000'.repeat(200_000)] // 6 bytes each in JSON: 1.2 MB
-  capRow(row)
-  assert.ok(jsonSize(row) <= 600_100, `row still ${jsonSize(row)} bytes`)
-  assert.match(String(row[0]), /… \[truncated, 200000 chars\]$/)
+test('a row of many long values is cut further to fit a page (measured as JSON bytes)', () => {
+  const row = Array.from({ length: 1024 }, () => '\u0000'.repeat(1000)) // 6 bytes each in JSON: 3 KB a cell
+  const preview = previewRow(row)
+  assert.ok(jsonSize(preview.cells) <= 600_100, `row still ${jsonSize(preview.cells)} bytes`)
+  assert.equal(preview.cut.length, 1024)
+  assert.ok(preview.cut.every(([, length]) => length === 1000))
 })
 
-test('small rows are left alone', () => {
+test('a preview never ends between the halves of a surrogate pair', () => {
+  const text = `${'x'.repeat(PREVIEW_CHARS - 1)}😀${'y'.repeat(10)}`
+  assert.equal(previewRow([text]).cells[0], `${'x'.repeat(PREVIEW_CHARS - 1)}…`)
+})
+
+test('small rows are sent as they are', () => {
   const small = ['x', 1]
-  capRow(small)
-  assert.deepEqual(small, ['x', 1])
+  assert.deepEqual(previewRow(small), { cells: small, cut: [] })
+  assert.equal(rowBytes(small), 2 + 16)
 })
 
 // --- Exact values: tedious's value reader, as worker/exact-values.ts wraps it -----------------

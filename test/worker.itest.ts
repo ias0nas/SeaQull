@@ -96,7 +96,7 @@ test('run → status → rows → export, all plain JSON', async () => {
   const page = await call('query.rows', { runId, result: 0, offset: 0, limit: 10 })
   assert.equal(page.rows.length, 3)
   const exp = await call('export.prepare', { runId, result: 0, format: 'json' })
-  const { text } = await call('export.chunk', { exportId: exp.exportId, index: 0 })
+  const { text } = await call('export.chunk', { exportId: exp.exportId, offset: 0 })
   assert.equal(JSON.parse(text).length, 3)
 })
 
@@ -349,7 +349,30 @@ test('a script of about 1 MB, heavy in quotes and newlines, is sent in parts and
   const status = await runThrough('upload-1', sql)
   assert.equal(status.state, 'done', JSON.stringify(status.messages.slice(-3)))
   const { rows } = await call('query.rows', { runId: status.runId, result: 0, offset: 0, limit: 1 })
-  assert.deepEqual(rows[0], [250, 250 * value.length, value])
+  assert.deepEqual(rows[0].slice(0, 2), [250, 250 * value.length])
+  const prepared = await call('export.prepare', { runId: status.runId, result: 0, format: 'tsv', selection: { r0: 0, r1: 0, c0: 2, c1: 2 }, raw: true })
+  assert.deepEqual(await call('export.chunk', { exportId: prepared.exportId, offset: 0 }), { text: value, next: null })
+})
+
+test('long values: a short preview in pages; copies and exports of the whole values through export.prepare', async () => {
+  const status = await runThrough('tab-long', `SELECT REPLICATE(CAST(N'q' AS nvarchar(max)), 300000) AS q, CAST(REPLICATE(CAST(0xBEEF AS varbinary(max)), 300000) AS varbinary(max)) AS bin`)
+  assert.equal(status.state, 'done', JSON.stringify(status.messages))
+  const page = await call('query.rows', { runId: status.runId, result: 0, offset: 0, limit: 10 })
+  assert.deepEqual(page.cut, [[0, 0, 300_000], [0, 1, 1_200_002]])
+  const whole = async (input: Record<string, unknown>) => {
+    const prepared = await call('export.prepare', { runId: status.runId, result: 0, ...input })
+    let text = ''
+    for (let offset: number | null = 0; offset !== null; ) {
+      const chunk: { text: string; next: number | null } = await call('export.chunk', { exportId: prepared.exportId, offset })
+      text += chunk.text
+      offset = chunk.next
+    }
+    return text
+  }
+  const bin = `0x${'BEEF'.repeat(300_000)}`
+  assert.equal(await whole({ format: 'tsv', selection: { r0: 0, r1: 0, c0: 0, c1: 0 }, raw: true }), 'q'.repeat(300_000))
+  assert.equal(await whole({ format: 'tsv', selection: { r0: 0, r1: 0, c0: 1, c1: 1 }, raw: true }), bin)
+  assert.equal(await whole({ format: 'csv', headers: false }), `${'q'.repeat(300_000)},${bin}\r\n`)
 })
 
 test('the status-bar item shows only for a query running past 3 seconds, and hides after', async () => {

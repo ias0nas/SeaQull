@@ -7,7 +7,7 @@
 // all, Escape collapses the range (and clears a single cell). ⌘/Ctrl+C copies the selection with
 // or without headers as the console's "Headers" box says, ⇧⌘/Ctrl+Shift+C the other way;
 // right-click for more formats.
-import type { Cell, ColumnInfo, ExportFormat } from '../src/protocol.ts'
+import type { Cell, CellRange, ColumnInfo, ExportFormat, ValueCut } from '../src/protocol.ts'
 import { NUMERIC_TYPES } from '../src/shared/export.ts'
 import { showMenu, type MenuItem } from './menu.ts'
 import { keys } from './tooltip.ts'
@@ -19,11 +19,12 @@ const PAGE = 200
 const MAX_FETCH = 2000
 const OVERSCAN = 20
 
-export type FetchRows = (offset: number, limit: number) => Promise<Cell[][]>
+/** Rows from `offset`, and which values arrived cut short. */
+export type FetchRows = (offset: number, limit: number) => Promise<{ rows: Cell[][]; cut: ValueCut[] }>
 /** `default`: TSV, headers as the "Headers" box says (a single cell as its raw text); `inverse`:
  *  the same with headers the other way; a format: that format, headers as the setting says. */
 export type CopyKind = 'default' | 'inverse' | ExportFormat
-export type Range = { r0: number; r1: number; c0: number; c1: number }
+export type Range = CellRange
 type Point = { r: number; c: number }
 type DragMode = 'cells' | 'rows' | 'columns'
 
@@ -45,6 +46,8 @@ export class Grid {
   private readonly fetchRows: FetchRows
   private readonly options: GridOptions
   private readonly rows = new Map<number, Cell[]>()
+  /** By row, then column: each value that arrived cut short, its whole length and what the worker kept. */
+  private readonly cut = new Map<number, Map<number, { length: number; kept?: number }>>()
   private readonly pending = new Set<number>()
   private widths: number[] = []
   /** Left edge of each column in content coordinates (after the row-number column). */
@@ -145,15 +148,20 @@ export class Grid {
     this.select({ r: 0, c: 0 }, { r: this.rowCount - 1, c: this.columns.length - 1 }, false)
   }
 
-  /** The selected columns and rows, fetching any rows not loaded yet. */
-  async selectedData(): Promise<{ columns: ColumnInfo[]; rows: Cell[][]; range: Range } | null> {
+  /** The selected columns and rows, fetching any rows not loaded yet. `cut`: some of their values
+   *  arrived cut short, so the rows hold only the start of them. */
+  async selectedData(): Promise<{ columns: ColumnInfo[]; rows: Cell[][]; range: Range; cut: boolean } | null> {
     const range = this.selection()
     if (!range) return null
     await this.load(range.r0, range.r1)
     if (this.disposed) return null // switched away mid-load: the rows would be incomplete
     const rows: Cell[][] = []
-    for (let r = range.r0; r <= range.r1; r++) rows.push((this.rows.get(r) ?? []).slice(range.c0, range.c1 + 1))
-    return { columns: this.columns.slice(range.c0, range.c1 + 1), rows, range }
+    let cut = false
+    for (let r = range.r0; r <= range.r1; r++) {
+      rows.push((this.rows.get(r) ?? []).slice(range.c0, range.c1 + 1))
+      cut ||= [...(this.cut.get(r)?.keys() ?? [])].some((c) => c >= range.c0 && c <= range.c1)
+    }
+    return { columns: this.columns.slice(range.c0, range.c1 + 1), rows, range, cut }
   }
 
   private select(anchor: Point, focus: Point, reveal = true): void {
@@ -417,7 +425,9 @@ export class Grid {
         const node = cell(display(value), `cell${value === null ? ' null' : NUMERIC_TYPES.has(c.baseType) ? ' num' : ''}`, this.widths[i])
         if (inRows(r) && inColumns(i)) node.classList.add('sel')
         if (this.anchor?.r === r && this.anchor.c === i) node.classList.add('active')
-        if (typeof value === 'string' && (value.length > 40 || value.includes('\n'))) node.title = value.slice(0, 4000)
+        const cut = this.cut.get(r)?.get(i)
+        if (cut) node.title = `${value}\n\n${cutNote(cut.length, cut.kept)}`
+        else if (typeof value === 'string' && (value.length > 40 || value.includes('\n'))) node.title = value
         row.append(node)
       })
       fragment.append(row)
@@ -458,10 +468,14 @@ export class Grid {
   private async fill(from: number, to: number): Promise<void> {
     let at = from
     while (at < to && !this.disposed) {
-      const page = await this.fetchRows(at, to - at)
-      if (page.length === 0) break
-      page.forEach((values, i) => this.rows.set(at + i, values))
-      at += page.length
+      const { rows, cut } = await this.fetchRows(at, to - at)
+      if (rows.length === 0) break
+      for (const [i, c, length, kept] of cut) {
+        if (!this.cut.has(at + i)) this.cut.set(at + i, new Map())
+        this.cut.get(at + i)!.set(c, { length, kept })
+      }
+      rows.forEach((values, i) => this.rows.set(at + i, values))
+      at += rows.length
     }
   }
 }
@@ -479,7 +493,12 @@ function cell(text: string, className: string, width: number): HTMLElement {
   return node
 }
 
-/** One line per cell; the full text is in the tooltip, copies and exports. */
+const cutNote = (length: number, kept?: number) =>
+  kept === undefined
+    ? `${length.toLocaleString()} characters: copy or save to get all of them.`
+    : `${length.toLocaleString()} characters, too many to keep: copies and saves have the first ${kept.toLocaleString()}.`
+
+/** One line per cell: up to its first line break; the tooltip shows more. */
 function display(value: Cell | undefined): string {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'boolean') return value ? '1' : '0'

@@ -220,10 +220,10 @@ const activate: Activate = async (orca) => {
     return { ok: true as const }
   })
   handle('query.rows', async ({ runId, result, offset, limit }) => runs.rows(runId, result, offset, Math.min(limit, 2000)))
-  handle('export.prepare', async ({ runId, result, format, tableName, headers }) =>
-    runs.prepareExport(runId, result, format, tableName, headers !== false)
+  handle('export.prepare', async ({ runId, result, format, tableName, headers, selection, raw }) =>
+    runs.prepareExport(runId, result, format, tableName, headers !== false, selection, raw === true)
   )
-  handle('export.chunk', async ({ exportId, index }) => ({ text: runs.exportChunk(exportId, index) }))
+  handle('export.chunk', async ({ exportId, offset }) => runs.exportChunk(exportId, offset))
 
   shutdown = () => {
     runs.dispose()

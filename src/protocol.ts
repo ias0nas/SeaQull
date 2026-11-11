@@ -94,6 +94,14 @@ export type RunStatus = {
   messagesFrom?: number
 }
 
+/** Rows r0…r1 and columns c0…c1 of a result, inclusive. */
+export type CellRange = { r0: number; r1: number; c0: number; c1: number }
+
+/** A value query.rows sent cut short: [index in `rows`, column, whole length in characters, and
+ *  when the worker itself keeps only the start of it (values over 20,000,000 characters, or rows
+ *  too large to keep whole), how many characters it kept: copies and exports have only those]. */
+export type ValueCut = [row: number, column: number, length: number, kept?: number]
+
 export type ExportFormat = 'csv' | 'tsv' | 'json' | 'jsonl' | 'markdown' | 'sql'
 
 /** `t` table, `v` view, `p` procedure, `f` function (scalar or table-valued), `s` synonym. */
@@ -183,17 +191,21 @@ declare module 'orca' {
     /** A workbook tab closed: cancel its query and end its SQL session. */
     'query.close': { input: { consoleId: string }; output: { ok: true } }
     'query.cancel': { input: { runId: string }; output: { ok: true } }
-    /** Rows `[offset, offset + limit)` of a result, cut short to stay under the answer size cap. */
+    /** Rows `[offset, offset + limit)` of a result, as many as fit under the answer size cap. Text
+     *  longer than a short preview ends in `…`; `cut` lists those values. */
     'query.rows': {
       input: { runId: string; result: number; offset: number; limit: number }
-      output: { offset: number; rows: Cell[][] }
+      output: { offset: number; rows: Cell[][]; cut: ValueCut[] }
     }
-    /** Formats a whole result in the worker; fetch it with export.chunk. */
+    /** Formats a result in the worker, from its full values; fetch it with export.chunk. */
     'export.prepare': {
-      /** `headers` (CSV/TSV, default true): include the header row. */
-      input: { runId: string; result: number; format: ExportFormat; tableName?: string; headers?: boolean }
-      output: { exportId: string; chunks: number; length: number; fileName: string; mimeType: string }
+      /** `headers` (CSV/TSV, default true): include the header row. `selection`: only those rows
+       *  and columns. `raw`: the text of the one selected cell, in no format. */
+      input: { runId: string; result: number; format: ExportFormat; tableName?: string; headers?: boolean; selection?: CellRange; raw?: boolean }
+      output: { exportId: string; length: number; fileName: string; mimeType: string }
     }
-    'export.chunk': { input: { exportId: string; index: number }; output: { text: string } }
+    /** The export's text from character `offset`, as much as fits in one answer; `next` is where the
+     *  following chunk starts, null after the last. */
+    'export.chunk': { input: { exportId: string; offset: number }; output: { text: string; next: number | null } }
   }
 }

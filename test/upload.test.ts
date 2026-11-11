@@ -1,7 +1,8 @@
 // Sending scripts: sizes measured as Orca measures them (encoded JSON), large ones in parts.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { jsonStringBytes, MAX_REQUEST_BYTES, MAX_SCRIPT_BYTES, sendRun, splitForJson } from '../src/shared/upload.ts'
+import { jsonStringBytes } from '../src/shared/json-bytes.ts'
+import { MAX_REQUEST_BYTES, MAX_SCRIPT_BYTES, sendRun, splitForJson } from '../src/shared/upload.ts'
 
 const encoded = (value: unknown) => Buffer.byteLength(JSON.stringify(value))
 

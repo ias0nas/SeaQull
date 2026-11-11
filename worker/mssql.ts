@@ -26,8 +26,8 @@ export type Endpoint = {
 
 export type Credentials = { kind: 'sql'; user: string; password: string } | { kind: 'entra'; token: string }
 
-/** Longest text kept per cell; anything longer (nvarchar(max), xml…) is cut with a marker. */
-export const MAX_CELL_CHARS = 200_000
+/** Longest text kept per cell (binary: as hex); anything longer is cut with a marker. */
+export const MAX_CELL_CHARS = 20_000_000
 
 /** `requestTimeout` 0 (the default) lets queries run until done or cancelled; the explorer passes
  *  a finite one so a blocked catalog query cannot hold up its connection forever. */
@@ -78,8 +78,9 @@ function describeConnectError(err: Error & { code?: string; cause?: unknown }): 
 export type BatchEvents = {
   /** A new result set starts. */
   onColumns(columns: ColumnInfo[]): void
-  /** Return false to stop (the row limit): the batch is cancelled after this row. */
-  onRow(cells: Cell[]): boolean
+  /** Return false to stop (the row limit): the batch is cancelled after this row. `cut`: [column,
+   *  whole length] of its values cut to MAX_CELL_CHARS. */
+  onRow(cells: Cell[], cut: [number, number][]): boolean
   /** A statement finished; `hadResult` when it produced the result set that just ended. */
   onStatementDone(rowCount: number | undefined, hadResult: boolean): void
   onInfo(text: string, line?: number): void
@@ -137,7 +138,9 @@ export function runBatch(connection: Connection, sql: string, events: BatchEvent
     })
     request.on('row', (columns: { value: unknown; metadata: ColumnMetadata }[]) => {
       if (stopped) return
-      const keepGoing = events.onRow(columns.map((c) => toCell(c.value, c.metadata)))
+      const cut: [number, number][] = []
+      const cells = columns.map((c, i) => toCell(c.value, c.metadata, (length) => cut.push([i, length])))
+      const keepGoing = events.onRow(cells, cut)
       if (!keepGoing) {
         stopped = true
         connection.cancel()
@@ -227,19 +230,22 @@ function timePart(d: Date, scale = 3): string {
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${fraction ? `.${fraction}` : ''}`
 }
 const TRUNCATED_RE = /… \[truncated, (\d+) chars\]$/
-/** Cuts text to `keep` characters with a marker giving the original length (kept from an earlier cut). */
+export const truncationMarker = (length: number) => `… [truncated, ${length} chars]`
+/** Cuts text to `keep` characters, never between the halves of a surrogate pair, with a marker
+ *  giving the original length (kept from an earlier cut). */
 export function truncateText(text: string, keep: number, originalLength = text.length): string {
-  const marked = TRUNCATED_RE.exec(text)
+  const marked = TRUNCATED_RE.exec(text.slice(-64))
   const length = marked ? Number(marked[1]) : originalLength
-  const body = marked ? text.slice(0, marked.index) : text
-  return `${body.slice(0, keep)}… [truncated, ${length} chars]`
+  const body = marked ? text.slice(0, text.length - marked[0].length) : text
+  const high = body.charCodeAt(keep - 1)
+  const end = high >= 0xd800 && high <= 0xdbff ? keep - 1 : keep
+  return `${body.slice(0, end)}${truncationMarker(length)}`
 }
-const truncated = (text: string, length: number) => truncateText(text, MAX_CELL_CHARS, length)
 
 /** Converts a tedious value to a JSON-safe cell. tedious returns datetimes as UTC-based Dates
  *  (useUTC), so UTC getters give back the stored wall-clock value. Decimal, numeric, money,
  *  smallmoney and datetimeoffset values arrive as exact text already (exact-values.ts). */
-export function toCell(value: unknown, meta: Meta): Cell {
+export function toCell(value: unknown, meta: Meta, onCut?: (length: number) => void): Cell {
   if (value === null || value === undefined) return null
   const baseType = baseTypeOf(meta)
   if (value instanceof Date) {
@@ -259,15 +265,20 @@ export function toCell(value: unknown, meta: Meta): Cell {
   }
   if (Buffer.isBuffer(value)) {
     // Hex is two characters a byte: cap the bytes before converting (varbinary(max) can be huge).
+    const length = value.length * 2 + 2
     const hex = `0x${value.subarray(0, MAX_CELL_CHARS / 2).toString('hex').toUpperCase()}`
-    return value.length * 2 + 2 > MAX_CELL_CHARS ? truncated(hex, value.length * 2 + 2) : hex
+    if (length <= MAX_CELL_CHARS) return hex
+    onCut?.(length)
+    return truncateText(hex, MAX_CELL_CHARS, length)
   }
   if (typeof value === 'bigint') return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString()
   if (typeof value === 'number' || typeof value === 'boolean') return Number.isFinite(value as number) || typeof value === 'boolean' ? value : String(value)
   if (typeof value === 'string') {
     // tedious returns bigint as a string; keep it a number when that is exact.
     if (baseType === 'bigint' && Number.isSafeInteger(Number(value))) return Number(value)
-    return value.length > MAX_CELL_CHARS ? truncated(value, value.length) : value
+    if (value.length <= MAX_CELL_CHARS) return value
+    onCut?.(value.length)
+    return truncateText(value, MAX_CELL_CHARS)
   }
   return String(value)
 }
