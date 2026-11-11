@@ -6,7 +6,8 @@
 // everything. Arrows move, Shift+arrows extend, ⌘/Ctrl+arrows jump to the edge, ⌘/Ctrl+A selects
 // all, Escape collapses the range (and clears a single cell). ⌘/Ctrl+C copies the selection with
 // or without headers as the console's "Headers" box says, ⇧⌘/Ctrl+Shift+C the other way;
-// right-click for more formats.
+// right-click for more formats. Drag a header's right edge to resize its column, double-click it to
+// fit the column to its loaded values.
 import type { Cell, CellRange, ColumnInfo, ExportFormat, ValueCut } from '../src/protocol.ts'
 import { NUMERIC_TYPES } from '../src/shared/export.ts'
 import { showMenu, type MenuItem } from './menu.ts'
@@ -18,6 +19,17 @@ const PAGE = 200
 /** The worker answers at most this many rows per request. */
 const MAX_FETCH = 2000
 const OVERSCAN = 20
+/** Starting widths fit the header and the first page of values, within these. */
+const AUTO_MIN_WIDTH = 64
+const AUTO_MAX_WIDTH = 480
+const AUTO_MAX_CHARS = 60
+/** A double-click fits the loaded values' first lines, up to this. */
+const FIT_MAX_WIDTH = 1000
+/** Dragging stays within these. */
+const MIN_WIDTH = 40
+const MAX_WIDTH = 2000
+/** Half the width of the zone on a header's right edge that resizes the column. */
+const EDGE = 3
 
 /** Rows from `offset`, and which values arrived cut short. */
 export type FetchRows = (offset: number, limit: number) => Promise<{ rows: Cell[][]; cut: ValueCut[] }>
@@ -37,6 +49,9 @@ export type GridOptions = {
   onSelectionChange?: (range: Range | null) => void
   /** Whether copies include headers unless inverted (the "Headers" box). */
   headers: () => boolean
+  /** Widths the user set earlier, by column; the others are fitted. */
+  widths?: ReadonlyMap<number, number>
+  onResize?: (column: number, width: number) => void
 }
 
 export class Grid {
@@ -54,6 +69,9 @@ export class Grid {
   private lefts: number[] = []
   private body!: HTMLElement
   private headerCells: HTMLElement[] = []
+  private handles: HTMLElement[] = []
+  /** Ends the column resize under way. */
+  private endResize: (() => void) | null = null
   private frame = 0
   private disposed = false
   private anchor: Point | null = null
@@ -71,6 +89,7 @@ export class Grid {
     this.root.scrollTop = 0
     this.root.scrollLeft = 0
     this.root.tabIndex = 0
+    this.root.classList.remove('resizing')
     this.listen(root, 'scroll', () => this.schedule())
     this.listen(root, 'mousedown', (e) => this.onMouseDown(e as MouseEvent))
     this.listen(root, 'contextmenu', (e) => this.onContextMenu(e as MouseEvent))
@@ -87,13 +106,8 @@ export class Grid {
   async mount(): Promise<void> {
     await this.ensure(0)
     if (this.disposed) return
-    this.widths = this.measure()
-    let left = this.rowNumWidth()
-    this.lefts = this.widths.map((w) => {
-      const start = left
-      left += w
-      return start
-    })
+    const sample = [...this.rows.values()].slice(0, PAGE)
+    this.widths = this.columns.map((_, i) => this.options.widths?.get(i) ?? Math.min(AUTO_MAX_WIDTH, this.contentWidth(i, sample, AUTO_MAX_CHARS)))
     const header = el('div', 'grid-header')
     const corner = cell('#', 'hcell rownum corner', this.rowNumWidth())
     corner.title = `Select all (${keys.selectAll})`
@@ -108,6 +122,23 @@ export class Grid {
       header.append(h)
       return h
     })
+    this.handles = this.columns.map((_, i) => {
+      const handle = el('div', 'col-resize')
+      handle.dataset.c = String(i)
+      handle.title = 'Drag to resize; double-click to fit'
+      header.append(handle)
+      return handle
+    })
+    this.layout()
+    this.listen(header, 'pointerdown', (e) => this.onResizeStart(e as PointerEvent))
+    this.listen(header, 'dblclick', (e) => {
+      const handle = (e.target as HTMLElement).closest<HTMLElement>('.col-resize')
+      if (!handle) return
+      const c = Number(handle.dataset.c)
+      const fits = this.contentWidth(c, this.rows.values())
+      // Wider than the limit: keep a wider column as it is, never cut it below what fits.
+      this.setWidth(c, fits <= FIT_MAX_WIDTH ? fits : Math.max(FIT_MAX_WIDTH, Math.min(fits, this.widths[c])))
+    })
     this.body = el('div', 'grid-body')
     this.body.style.height = `${this.rowCount * ROW_HEIGHT}px`
     this.root.append(header, this.body)
@@ -118,6 +149,7 @@ export class Grid {
     this.disposed = true
     cancelAnimationFrame(this.frame)
     this.endDrag()
+    this.endResize?.()
     for (const [target, type, handler] of this.listeners) target.removeEventListener(type, handler)
   }
 
@@ -208,7 +240,7 @@ export class Grid {
     if (event.button !== 0 || this.rowCount === 0) return
     const target = event.target as HTMLElement
     // The scrollbars and the empty area below the rows belong to the grid element itself.
-    if (target === this.root || target === this.body) return
+    if (target === this.root || target === this.body || target.closest('.col-resize')) return
     const last = this.rowCount - 1
     const lastColumn = this.columns.length - 1
     event.preventDefault() // no text selection; the grid has its own
@@ -293,6 +325,64 @@ export class Grid {
     this.drag = null
   }
 
+  // --- Column widths ----------------------------------------------------------------------------
+
+  private onResizeStart(event: PointerEvent): void {
+    const handle = (event.target as HTMLElement).closest<HTMLElement>('.col-resize')
+    if (!handle || event.button !== 0) return
+    // Also keeps the mousedown that would start a column selection from firing.
+    event.preventDefault()
+    this.endResize?.()
+    const c = Number(handle.dataset.c)
+    const startX = event.clientX
+    const startWidth = this.widths[c]
+    handle.setPointerCapture(event.pointerId)
+    handle.classList.add('active')
+    this.root.classList.add('resizing')
+    // Hold the scroll extent, or shrinking a column while scrolled to the right end would scroll
+    // the edge away from the pointer.
+    this.body.style.minWidth = `${this.root.scrollWidth}px`
+    const move = (e: PointerEvent) => this.setWidth(c, startWidth + e.clientX - startX)
+    const events = ['pointerup', 'pointercancel', 'lostpointercapture'] as const
+    const end = () => {
+      if (this.endResize !== end) return
+      this.endResize = null
+      handle.removeEventListener('pointermove', move)
+      for (const type of events) handle.removeEventListener(type, end)
+      handle.classList.remove('active')
+      this.root.classList.remove('resizing')
+      this.body.style.minWidth = ''
+    }
+    this.endResize = end
+    handle.addEventListener('pointermove', move)
+    for (const type of events) handle.addEventListener(type, end)
+  }
+
+  private setWidth(c: number, width: number): void {
+    const next = Math.round(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width)))
+    if (next === this.widths[c]) return
+    this.widths[c] = next
+    this.headerCells[c].style.width = `${next}px`
+    this.layout()
+    this.schedule()
+    this.options.onResize?.(c, next)
+  }
+
+  /** Each column's left edge from the widths, and the resize handles on their right edges. */
+  private layout(): void {
+    let left = this.rowNumWidth()
+    this.lefts = this.widths.map((w) => {
+      const start = left
+      left += w
+      return start
+    })
+    const last = this.columns.length - 1
+    this.handles.forEach((handle, i) => {
+      // The last one inside the grid's edge, so it adds no scrolling.
+      handle.style.left = `${this.lefts[i] + this.widths[i] - (i === last ? 2 * EDGE : EDGE)}px`
+    })
+  }
+
   private onContextMenu(event: MouseEvent): void {
     const target = event.target as HTMLElement
     if (!target.closest('.grid-body') && !target.closest('.grid-header')) return
@@ -371,14 +461,12 @@ export class Grid {
     return Math.max(44, String(this.rowCount).length * 8 + 20)
   }
 
-  /** Column widths from the header and the first page of values. */
-  private measure(): number[] {
-    const sample = [...this.rows.values()].slice(0, PAGE)
-    return this.columns.map((c, i) => {
-      let chars = Math.max(c.name.length, Math.ceil(c.type.length * 0.8) + 2)
-      for (const row of sample) chars = Math.max(chars, Math.min(60, display(row[i]).length))
-      return Math.round(Math.min(480, Math.max(64, chars * 7.4 + 18)))
-    })
+  /** The width a column's header and the first lines of `rows` need (up to `maxChars` characters). */
+  private contentWidth(i: number, rows: Iterable<Cell[]>, maxChars = Infinity): number {
+    const c = this.columns[i]
+    let chars = Math.max(c.name.length, Math.ceil(c.type.length * 0.8) + 2)
+    for (const row of rows) chars = Math.max(chars, Math.min(maxChars, display(row[i]).length))
+    return Math.round(Math.max(AUTO_MIN_WIDTH, chars * 7.4 + 18))
   }
 
   private schedule(): void {

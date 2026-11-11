@@ -42,6 +42,7 @@ export function installTooltips(): void {
   }
 
   document.addEventListener('mouseover', (event) => {
+    if (event.buttons) return hide() // mid-drag
     const el = (event.target as HTMLElement).closest<HTMLElement>('[title], [data-tip]')
     if (el?.hasAttribute('title')) {
       // Latest text wins: code may have set `title` again since the last hover.
@@ -59,7 +60,7 @@ export function installTooltips(): void {
   document.addEventListener('mouseout', (event) => {
     if (target && !target.contains(event.relatedTarget as Node | null)) hide()
   })
-  for (const type of ['mousedown', 'keydown', 'wheel']) document.addEventListener(type, hide, true)
+  for (const type of ['pointerdown', 'mousedown', 'keydown', 'wheel']) document.addEventListener(type, hide, true)
   document.addEventListener('scroll', hide, true)
   window.addEventListener('blur', hide)
 }

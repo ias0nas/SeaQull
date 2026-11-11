@@ -123,6 +123,8 @@ type Tab = {
   status: RunStatus | null
   /** The result (or 'messages') shown below the editor. */
   view: number | 'messages'
+  /** Column widths the user set, by result, then column; for the run shown. */
+  widths?: Map<number, Map<number, number>>
   running: boolean
   pollTimer: number
   statusText: string
@@ -676,6 +678,7 @@ async function startRun(tab: Tab, connectionId: string, database: string, sql: s
     // The worker dropped the previous run's results: take its grid down rather than leave it dead.
     tab.status = null
     tab.view = 0
+    tab.widths = undefined
     if (tab === active()) renderResults()
     if (tab.cancelPending) void request('query.cancel', { runId }).catch(() => undefined)
     void follow(tab, runId)
@@ -822,6 +825,7 @@ function renderResults(): void {
   ui.resultInfo.textContent = info
   const runId = status.runId
   const index = tab.view as number
+  const widths = (tab.widths ??= new Map())
   grid = new Grid(ui.grid, {
     columns: result.columns,
     rowCount: result.rowCount,
@@ -835,7 +839,12 @@ function renderResults(): void {
       syncCopyButton(!!range)
       resetExport() // a pending "Ready to copy" holds the old selection
     },
-    headers: () => ui.includeHeaders.checked
+    headers: () => ui.includeHeaders.checked,
+    widths: widths.get(index),
+    onResize: (column, width) => {
+      if (!widths.has(index)) widths.set(index, new Map())
+      widths.get(index)!.set(column, width)
+    }
   })
   syncCopyButton(false)
   void grid.mount().catch((err) => setStatus(errorText(err), true, tab))

@@ -159,6 +159,10 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .hcell.selected, .rownum.selected { background: color-mix(in srgb, var(--sel) 18%, var(--orca-card, Canvas)); color: var(--orca-foreground, CanvasText); }
 .hcell.whole, .rownum.whole { background: color-mix(in srgb, var(--sel) 38%, var(--orca-card, Canvas)); color: var(--orca-foreground, CanvasText); }
 .loading { color: var(--muted); }
+.col-resize { position: absolute; top: 0; bottom: 0; width: 6px; z-index: 0; cursor: col-resize; }
+.col-resize::after { content: ''; position: absolute; top: 3px; bottom: 3px; left: 2px; width: 2px; border-radius: 1px; }
+.col-resize:hover::after, .col-resize.active::after { background: var(--sel); }
+.grid.resizing, .grid.resizing * { cursor: col-resize !important; }
 
 .messages { flex: 1 1 auto; overflow: auto; margin: 0; padding: 6px 8px 6px 36px; font: 12px/1.5 var(--mono); }
 .messages li { white-space: pre-wrap; }
